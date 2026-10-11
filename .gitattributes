@@ -1,0 +1,20 @@
+# 统一按 LF 存进仓库。
+#
+# ⚠️ 现有启动脚本（启动.cmd / .sh / .command）**实测都是 LF 且能正常工作**
+#（批处理用的是 goto + 标签，没有 LF 敏感的括号块），
+# 所以这里不做 CRLF 转换 —— 免得 `git checkout` 时改动它们反而弄坏启动器。
+* text=auto eol=lf
+
+# 显式标记为文本，避免 Git 把中文内容当二进制
+*.js      text
+*.mjs     text
+*.json    text
+*.md      text
+*.yml     text
+*.yaml    text
+*.css     text
+*.html    text
+*.txt     text
+*.cmd     text
+*.command text
+*.sh      text

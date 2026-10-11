@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小说 → 角色卡生成器</title>
+<meta name="description" content="把小说文本自动转换为 SillyTavern 角色卡：A 包世界书 + B 包酒馆助手预设，本地运行。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234de2c0'/%3E%3Ctext x='16' y='22' font-size='18' text-anchor='middle' fill='%230b0f16' font-family='sans-serif' font-weight='bold'%3E%E5%8D%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/panels.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">卡</div>
+      <div>
+        <div class="name">角色卡生成器</div>
+        <div class="ver">正在加载…</div>
+      </div>
+    </div>
+    <div class="empty" style="padding:20px 8px">
+      <span class="spin"></span>
+      <div style="margin-top:10px">正在初始化界面</div>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <div class="title">小说 → 角色卡生成器</div>
+        <div class="sub">加载中…</div>
+      </div>
+    </header>
+    <main class="content"></main>
+  </div>
+</div>
+
+<noscript>
+  <div style="padding:40px;text-align:center">
+    <h1>需要启用 JavaScript</h1>
+    <p style="color:#8b949e;margin-top:10px">界面依赖 JavaScript 运行；若无法启用，可直接调用后端 API：<code>POST /api/generate</code></p>
+  </div>
+</noscript>
+
+<script type="module" src="/js/app.js"></script>
+<script>
+  // 模块加载或执行失败时，给出能真正定位问题的信息（而不是笼统的“加载失败”）
+  (function () {
+    var reported = false;
+    function showPanel(title, detail) {
+      if (reported) return;
+      reported = true;
+      var host = document.querySelector('.content') || document.body;
+      var box = document.createElement('div');
+      box.className = 'card';
+      box.style.cssText = 'max-width:720px;margin:50px auto';
+      var h = document.createElement('h2');
+      h.style.color = '#ff6b6b';
+      h.textContent = title;
+      var pre = document.createElement('pre');
+      pre.className = 'code';
+      pre.style.marginTop = '10px';
+      pre.textContent = detail;
+      box.appendChild(h);
+      box.appendChild(pre);
+      host.innerHTML = '';
+      host.appendChild(box);
+    }
+
+    // 1) 资源本身加载失败（404 / 断网 / file:// 打开）
+    window.addEventListener('error', function (e) {
+      var t = e.target;
+      if (t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
+        var src = t.src || t.href || '(未知)';
+        var isFile = location.protocol === 'file:';
+        showPanel('界面脚本加载失败', [
+          '加载失败的资源：' + src,
+          '',
+          isFile
+            ? '当前是 file:// 直接打开，ES 模块必须通过 HTTP 访问。\n请运行 node server.js 后打开 http://localhost:3000'
+            : '该资源返回了错误或不存在。\n\n排查建议：\n' +
+              '· 确认服务仍在运行：node server.js\n' +
+              '· 直接访问上面的 URL，看返回内容\n' +
+              '· 若是 404，说明该文件缺失或被移动了',
+        ].join('\n'));
+      }
+    }, true);
+
+    // 2) 模块执行期抛错（import 失败、顶层异常）
+    window.addEventListener('error', function (e) {
+      if (e.message && !e.target) {
+        showPanel('界面脚本执行出错', (e.message || '') + '\n' + (e.filename || '') + (e.lineno ? ':' + e.lineno : ''));
+      }
+    });
+
+    // 3) 兜底：2 秒后界面仍是初始占位，说明模块没跑起来
+    setTimeout(function () {
+      var init = document.querySelector('.sidebar .ver');
+      if (init && /正在加载/.test(init.textContent)) {
+        showPanel('界面未能初始化', [
+          'HTTP 已连通（本页面正常返回），但 ES 模块没有执行完成。',
+          '',
+          '最常见原因：某个模块 import 失败（例如路径 404）。',
+          '请按 F12 打开控制台查看红色的模块加载错误，并检查 Network 里是否有 404。',
+        ].join('\n'));
+      }
+    }, 2000);
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+{
+  "sourceCard": "云京旧案",
+  "sourceCardFile": "character_card.json",
+  "chapterRange": "1-5",
+  "processedChapters": 5,
+  "processedChapterTitles": [
+    "第1章 新篇1",
+    "第2章 新篇2",
+    "第3章 新篇3",
+    "第4章 新篇4",
+    "第5章 新篇5"
+  ],
+  "processedChars": 5230,
+  "strategy": "merge",
+  "before": {
+    "entries": 15,
+    "characters": 2,
+    "events": 2,
+    "worldbook": 2
+  },
+  "extracted": {
+    "events": 2,
+    "characters": 2,
+    "worldbook": 2,
+    "phases": 1
+  },
+  "matched": [
+    {
+      "type": "character",
+      "existingName": "卡卡西",
+      "newName": "旗木卡卡西",
+      "confidence": 0.95,
+      "reason": "同一角色的全名与简称",
+      "action": "merge"
+    }
+  ],
+  "added": [
+    {
+      "type": "character",
+      "name": "沈砚"
+    }
+  ],
+  "updated": [],
+  "conflicts": [
+    {
+      "type": "character",
+      "existingName": "卡卡西",
+      "newName": "旗木卡卡西",
+      "field": "性格",
+      "existing": "散漫、爱迟到",
+      "new": "果断独行",
+      "severity": "high"
+    }
+  ],
+  "skipped": [],
+  "alignDegraded": false,
+  "version": {
+    "from": "1.0",
+    "to": "1.1"
+  }
+}

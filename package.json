@@ -1,0 +1,80 @@
+{
+  "name": "novel-image-to-card",
+  "version": "1.5.0",
+  "type": "module",
+  "description": "小说 / 图片一键生成 SillyTavern 角色卡：A 包世界书 + B 包酒馆助手预设，含时间线、事件压力、剧情阶段、人设增量与 MVU 变量树；支持完善已有角色卡与图片生成角色卡",
+  "license": "MIT",
+  "author": {
+    "name": "米德格拉伊",
+    "url": "https://github.com/1KMJTIO194"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1KMJTIO194/novel-image-to-card.git"
+  },
+  "homepage": "https://github.com/1KMJTIO194/novel-image-to-card#readme",
+  "bugs": {
+    "url": "https://github.com/1KMJTIO194/novel-image-to-card/issues"
+  },
+  "keywords": [
+    "sillytavern",
+    "character-card",
+    "tavern-card",
+    "worldbook",
+    "lorebook",
+    "novel",
+    "llm",
+    "chara-card-v3",
+    "vision",
+    "deepseek"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "archiver": "^7.0.0",
+    "express": "^4.19.0",
+    "iconv-lite": "^0.7.3",
+    "jschardet": "^3.1.4",
+    "multer": "^2.0.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "ejs": "^6.0.1",
+    "jsdom": "^24.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "launch": "node scripts/launcher.mjs",
+    "test": "node tests/character-card.mjs && node tests/data-layer.mjs && node tests/chapter-range.mjs && node tests/robustness.mjs && node tests/augment.mjs && node tests/density.mjs && node tests/dates.mjs && node tests/statusbar.mjs && node tests/batcher.mjs && node tests/merge_batches.mjs && node tests/character-tiers.mjs && node tests/pipeline-merge.mjs && node tests/output-mode.mjs && node tests/api-config.mjs && node tests/encoding.mjs && node tests/filename-encoding.mjs && node tests/preset.mjs && node tests/progress-persist.mjs && node tests/launcher.mjs && node tests/e2e.mjs && node tests/frontend-smoke.mjs && node tests/jsdom-smoke.mjs && node tests/preset-ui.mjs && node tests/form-audit.mjs && node tests/image-card.mjs && node tests/summary.mjs && node tests/card-doctor.mjs && node scripts/compare-merge-usage.mjs",
+    "test:summary": "node tests/summary.mjs",
+    "test:card-doctor": "node tests/card-doctor.mjs",
+    "test:card": "node tests/character-card.mjs",
+    "test:dates": "node tests/dates.mjs",
+    "test:statusbar": "node tests/statusbar.mjs",
+    "test:batcher": "node tests/batcher.mjs",
+    "test:merge": "node tests/merge_batches.mjs",
+    "test:tiers": "node tests/character-tiers.mjs",
+    "test:merge-usage": "node scripts/compare-merge-usage.mjs",
+    "test:data": "node tests/data-layer.mjs",
+    "test:chapters": "node tests/chapter-range.mjs",
+    "test:augment": "node tests/augment.mjs",
+    "test:mode": "node tests/output-mode.mjs",
+    "test:api": "node tests/api-config.mjs",
+    "test:encoding": "node tests/encoding.mjs",
+    "test:filename": "node tests/filename-encoding.mjs",
+    "test:preset": "node tests/preset.mjs",
+    "test:progress": "node tests/progress-persist.mjs",
+    "test:launcher": "node tests/launcher.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "test:ui": "node tests/frontend-smoke.mjs",
+    "test:dom": "node tests/jsdom-smoke.mjs",
+    "test:preset-ui": "node tests/preset-ui.mjs",
+    "test:form": "node tests/form-audit.mjs",
+    "test:image-card": "node tests/image-card.mjs",
+    "build:portable": "node build-package.js",
+    "test:robust": "node tests/robustness.mjs",
+    "test:density": "node tests/density.mjs"
+  }
+}

@@ -1,0 +1,383 @@
+/**
+ * 图片生成角色卡页
+ *
+ * 与「生成流程」页的定位差异：
+ *   · 生成流程：小说文本 → 大批量抽取 → 世界书 + 变量树 + 完整卡
+ *   · 本页：若干张图 → 视觉抽取人物外貌 → 同一套装配 → 同样的卡
+ *
+ * 后端 /api/image-card 的 SSE 事件与 /api/generate 完全一致，
+ * 所以进度展示、取消、切页不丢都直接复用 active-run，不需要另建一套。
+ */
+
+import { el, clear, field, truncate, fmtBytes } from '../core/dom.js';
+import { api } from '../core/api.js';
+import { state, toast, setConfig, on } from '../core/store.js';
+import { navigate } from '../core/router.js';
+import { createModelPicker } from '../core/model-picker.js';
+import { renderSummaryPanel } from '../core/summary-view.js';
+import * as run from '../core/active-run.js';
+
+/** 与后端 MAX_IMAGE_BYTES 保持一致（只用于前端提前提示） */
+const MAX_MB = 8;
+/**
+ * 与后端 MAX_IMAGES 保持一致。
+ *
+ * 原来这里是 8 —— 长漫画一话就有 15-25 页，8 张根本不够。
+ * 后端已支持分批送模型（每批 6 张），所以这里放宽到 60。
+ */
+const MAX_IMAGES = 60;
+/** 每批送模型多少张（与后端 DEFAULT_VISION_BATCH 一致，仅用于进度提示） */
+const VISION_BATCH = 6;
+const ACCEPT = '.png,.jpg,.jpeg,.webp,.gif';
+
+/** 允许的扩展名（与后端 validateImages 一致） */
+const OK_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+
+function extOf(name) {
+  const m = /\.([a-z0-9]+)$/i.exec(String(name || ''));
+  return (m?.[1] || '').toLowerCase();
+}
+
+export async function renderImageCard(mount) {
+  const page = el('div', { class: 'page' });
+  mount.appendChild(page);
+
+  /** 已选图片：{file, url, ok, reason} */
+  let picked = [];
+  const cleanups = [];
+  const onCleanup = (fn) => cleanups.push(fn);
+  const detach = () => { for (const f of cleanups) { try { f(); } catch {} } };
+  document.addEventListener('dsh:route-leave', detach, { once: true });
+
+  // ============================================================
+  // 1. 说明卡
+  // ============================================================
+  page.appendChild(el('div', { class: 'card' },
+    el('h2', { text: '图片 → 角色卡' }),
+    el('div', { class: 'hint', style: { marginTop: '6px', lineHeight: '1.7' } },
+      '上传若干张人物图，模型会读取外貌、服饰、气质与场景，生成与「小说 → 角色卡」',
+      '结构完全一致的角色卡（变量树 / 状态栏 / 正则体系 / 世界书）。'),
+    el('div', { class: 'hint', style: { marginTop: '8px', lineHeight: '1.7' } },
+      el('strong', { text: '两点必须知道：' }),
+      el('div', { text: '① 需要**支持视觉**的模型。实测 deepseek-flash 可以看图；若模型不支持，任务会失败并说明原因，不会静默产出空壳卡。' }),
+      el('div', { text: '② 图片只能给出外貌与服饰；姓名、身份、经历属于**推断**，卡里都标注了「（据画面推断）」或「图片未提供」，不会假装是图里读出来的。' })),
+  ));
+
+  // ============================================================
+  // 2. 图片选择
+  // ============================================================
+  const listBox = el('div', { class: 'grid thumbs', style: { marginTop: '10px' } });
+  const summaryEl = el('div', { class: 'hint' });
+  const fileInput = el('input', {
+    type: 'file', id: 'image-card-files', name: 'images',
+    accept: ACCEPT, multiple: true, style: { display: 'none' },
+  });
+  const dropZone = el('div', {
+    class: 'dropzone',
+    style: {
+      border: '1px dashed var(--border)', borderRadius: '10px', padding: '22px',
+      textAlign: 'center', cursor: 'pointer', transition: 'border-color .15s',
+    },
+  },
+    el('div', { style: { fontSize: '22px' }, text: '🖼' }),
+    el('div', { style: { marginTop: '6px' }, text: '点击选择图片，或把图片拖到这里' }),
+    el('div', { class: 'hint', text: `支持 ${OK_EXT.join(' / ')}，单张不超过 ${MAX_MB}MB，最多 ${MAX_IMAGES} 张` }),
+    el('div', { class: 'hint', text: `超过 ${VISION_BATCH} 张会自动分批送给模型（长漫画按话导入即可）` }),
+  );
+
+  const refresh = () => {
+    clear(listBox);
+    const okOnes = picked.filter(p => p.ok);
+    for (const [i, p] of picked.entries()) {
+      const badge = p.ok ? null : el('div', {
+        class: 'hint', style: { color: 'var(--danger)' }, text: p.reason,
+      });
+      listBox.appendChild(el('div', {
+        class: 'card tight',
+        style: { padding: '8px', opacity: p.ok ? '1' : '.55' },
+      },
+        el('img', {
+          src: p.url, alt: p.file.name,
+          style: { width: '100%', height: '150px', objectFit: 'cover', borderRadius: '6px', display: 'block' },
+        }),
+        el('div', { class: 'hint', style: { marginTop: '6px' }, text: `${i + 1}. ${truncate(p.file.name, 26)}` }),
+        el('div', { class: 'hint', text: fmtBytes(p.file.size) }),
+        badge,
+        el('button', {
+          class: 'btn sm ghost', type: 'button', style: { marginTop: '6px' },
+          text: '移除',
+          onclick: () => {
+            URL.revokeObjectURL(p.url);
+            picked = picked.filter(x => x !== p);
+            refresh();
+          },
+        }),
+      ));
+    }
+    const bad = picked.filter(p => !p.ok).length;
+    summaryEl.textContent = picked.length
+      ? `已选 ${okOnes.length} 张可用${bad ? `，${bad} 张不可用（见上方红字）` : ''}`
+      : '还没有选择图片';
+    summaryEl.style.color = bad ? 'var(--danger)' : 'var(--text-mute)';
+  };
+
+  const addFiles = (files) => {
+    for (const f of files) {
+      const ext = extOf(f.name);
+      let ok = true;
+      let reason = '';
+      if (!OK_EXT.includes(ext)) {
+        ok = false;
+        reason = `格式不支持（${ext || '无扩展名'}）`;
+      } else if (f.size > MAX_MB * 1024 * 1024) {
+        ok = false;
+        reason = `超过 ${MAX_MB}MB（${fmtBytes(f.size)}）`;
+      } else if (picked.filter(p => p.ok).length >= MAX_IMAGES) {
+        ok = false;
+        reason = `最多 ${MAX_IMAGES} 张`;
+      }
+      picked.push({ file: f, url: URL.createObjectURL(f), ok, reason });
+    }
+    refresh();
+  };
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = 'var(--accent)';
+  });
+  dropZone.addEventListener('dragleave', () => { dropZone.style.borderColor = 'var(--border)'; });
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = 'var(--border)';
+    addFiles([...(e.dataTransfer?.files || [])]);
+  });
+  fileInput.addEventListener('change', () => {
+    addFiles([...fileInput.files]);
+    fileInput.value = '';
+  });
+
+  const imageCard = el('div', { class: 'card' },
+    el('h3', { text: '① 选择图片' }),
+    el('div', { class: 'hint', text: '第 1 张会同时作为角色卡头像（avatar）' }),
+    dropZone, fileInput, listBox, summaryEl,
+  );
+  page.appendChild(imageCard);
+
+  // ============================================================
+  // 3. 设定与参数
+  // ============================================================
+  const titleInput = el('input', {
+    type: 'text', id: 'image-card-title', name: 'title',
+    placeholder: '（默认「图片生成的角色卡」）',
+  });
+  const hintInput = el('textarea', {
+    id: 'image-card-hint', name: 'hint', rows: '3',
+    placeholder: '可选。例如：这是修仙世界；她是主角的师姐；两人是同门。留空则完全从图片推断。',
+  });
+  const worldToggle = el('input', {
+    type: 'checkbox', id: 'image-card-world', name: 'wantWorldbook', checked: true,
+  });
+
+  page.appendChild(el('div', { class: 'card' },
+    el('h3', { text: '② 设定（都可选）' }),
+    field({ label: '角色卡名称', control: titleInput, id: 'image-card-title', name: 'title' }),
+    field({
+      label: '文字补充设定', control: hintInput, id: 'image-card-hint', name: 'hint',
+      hint: '写在这里的设定优先于图片推断，并会记进 notes。图片给不了剧情，填一段能显著提升可用性。',
+    }),
+    el('label', { class: 'check', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+      worldToggle,
+      el('span', { text: '生成世界观条目（世界概览 + 画面中出现的场景）' })),
+    el('div', { class: 'hint', style: { marginTop: '4px' },
+      text: '图片只能推出很粗的世界观（场景、题材线索），条目会明确标注"由图片推断"。' }),
+  ));
+
+  // ============================================================
+  // 3b. 分批设置（长漫画用）
+  // ============================================================
+  const batchInput = el('input', {
+    type: 'number', id: 'image-card-batch', name: 'batchSize',
+    value: String(VISION_BATCH), min: '1', max: '12', step: '1',
+    style: { width: '90px' },
+  });
+  page.appendChild(el('div', { class: 'card' },
+    el('h3', { text: '③ 分批设置' }),
+    field({
+      label: '每批送给模型的张数', control: batchInput,
+      id: 'image-card-batch', name: 'batchSize',
+      hint: `图片会按这个张数分批分析（默认 ${VISION_BATCH}）。张数越少每张图的分析越细、但请求更多；`
+        + '张数太多会让模型对每张图的注意力变差。长漫画一般保持默认即可。',
+    }),
+  ));
+
+  // ============================================================
+  // 4. API 配置
+  // ============================================================
+  const baseUrlInput = el('input', { type: 'text', id: 'image-card-baseurl', name: 'baseUrl', value: state.config.baseUrl, placeholder: 'https://api.deepseek.com/v1' });
+  const keyInput = el('input', { type: 'password', id: 'image-card-apikey', name: 'apiKey', value: state.config.apiKey, placeholder: 'sk-...' });
+  const modelInput = el('input', { type: 'text', id: 'image-card-model', name: 'model', value: state.config.model, placeholder: 'deepseek-flash / gpt-4o / qwen-vl-max' });
+  for (const i of [baseUrlInput, keyInput]) {
+    i.setAttribute('autocomplete', 'off');
+    i.setAttribute('autocapitalize', 'off');
+    i.setAttribute('spellcheck', 'false');
+  }
+
+  const modelHint = el('div', { class: 'hint', text: '未拉取候选（可直接输入模型名）' });
+  const modelPicker = createModelPicker({
+    input: modelInput,
+    loadModels: async () => {
+      setConfig({ baseUrl: baseUrlInput.value.trim(), apiKey: keyInput.value.trim() });
+      const r = await api.models({ baseUrl: state.config.baseUrl, apiKey: state.config.apiKey });
+      return r.models || [];
+    },
+    onPick: () => setConfig({ model: modelInput.value.trim() }),
+    autoLoad: true,
+    emptyHint: '还没有候选列表',
+  });
+  onCleanup(() => modelPicker.destroy());
+
+  const paintModelHint = () => {
+    modelHint.textContent = modelPicker.summary();
+    modelHint.style.color = modelPicker.status === 'error' ? 'var(--danger)'
+      : modelPicker.status === 'ready' ? 'var(--ok)' : 'var(--text-mute)';
+  };
+  modelInput.addEventListener('focus', () => setTimeout(paintModelHint, 400));
+  modelPicker.panel.addEventListener('click', () => setTimeout(paintModelHint, 50));
+
+  baseUrlInput.addEventListener('change', () => {
+    setConfig({ baseUrl: baseUrlInput.value.trim().replace(/\/+$/, '') });
+    baseUrlInput.value = state.config.baseUrl;
+    modelPicker.invalidate(`${state.config.baseUrl}|${state.config.apiKey}`);
+    paintModelHint();
+  });
+  keyInput.addEventListener('change', () => {
+    setConfig({ apiKey: keyInput.value.trim() });
+    modelPicker.invalidate(`${state.config.baseUrl}|${state.config.apiKey}`);
+    paintModelHint();
+  });
+  modelInput.addEventListener('change', () => setConfig({ model: modelInput.value.trim() }));
+
+  page.appendChild(el('div', { class: 'card' },
+    el('h3', { text: '③ API 配置' }),
+    el('div', { class: 'hint', style: { marginBottom: '8px' } },
+      el('strong', { text: '需要支持视觉的模型。' }),
+      ' 实测 deepseek-flash 可以看图；不支持视觉的模型会返回「看不到图片」，',
+      '任务会失败并给出提示 —— 不会静默产出一张空壳卡。'),
+    el('div', { class: 'row' },
+      el('div', { style: { flex: '1 1 240px' } }, field({ label: 'Base URL', control: baseUrlInput, id: 'image-card-baseurl', name: 'baseUrl' })),
+      el('div', { style: { flex: '1 1 200px' } }, field({ label: 'API Key', control: keyInput, id: 'image-card-apikey', name: 'apiKey' })),
+      el('div', { style: { flex: '1 1 200px' } }, field({ label: '模型', control: modelInput, id: 'image-card-model', name: 'model', hint: '' })),
+    ),
+    modelHint,
+  ));
+
+  // ============================================================
+  // 5. 提交 + 进度
+  // ============================================================
+  const startBtn = el('button', { class: 'btn primary', type: 'button', text: '开始生成' });
+  const cancelBtn = el('button', { class: 'btn ghost', type: 'button', text: '取消', style: { display: 'none' } });
+  const progressBox = el('div', { class: 'card', style: { display: 'none' } });
+  const logBox = el('pre', {
+    class: 'code',
+    style: { maxHeight: '240px', overflow: 'auto', marginTop: '8px', whiteSpace: 'pre-wrap' },
+  });
+  progressBox.append(el('h3', { text: '④ 进度' }), logBox);
+
+  /** 总结区：任务完成后显示"这次产出了什么" */
+  const summaryHost = el('div', { class: 'sum-host' });
+  progressBox.appendChild(summaryHost);
+
+  const paintSummary = () => {
+    const snap = run.snapshot();
+    if (snap?.status === 'running') { clear(summaryHost); return; }
+    const inline = snap?.summary;
+    if (inline) {
+      clear(summaryHost);
+      summaryHost.appendChild(renderSummaryPanel(inline));
+      return;
+    }
+    // 刷新页面后 SSE 的 summary 已经丢了 → 向后端要一次
+    const taskId = snap?.taskId;
+    if (!taskId || summaryHost.dataset.task === taskId) return;
+    summaryHost.dataset.task = taskId;
+    clear(summaryHost);
+    summaryHost.appendChild(el('div', { class: 'hint', text: '正在读取总结…' }));
+    api.summary(taskId).then((r) => {
+      clear(summaryHost);
+      if (r?.summary) summaryHost.appendChild(renderSummaryPanel(r.summary));
+    }).catch(() => { clear(summaryHost); });
+  };
+
+  /** 把 active-run 的事件流画到页面上（切页回来也能继续显示） */
+  const paint = () => {
+    const snap = run.snapshot();
+    const active = snap?.status === 'running';
+    startBtn.disabled = active;
+    startBtn.textContent = active ? '生成中…' : '开始生成';
+    cancelBtn.style.display = active ? '' : 'none';
+    if (snap?.status === 'idle') { summaryHost.innerHTML = ''; return; }
+    progressBox.style.display = '';
+    paintSummary();
+    const lines = (run.events || [])
+      .filter(e => e.event === 'progress' || e.event === 'error')
+      .map(e => {
+        if (e.event === 'error') return `❌ ${e.data?.message || ''}`;
+        const step = e.data?.step || '';
+        const warn = step === 'WARN' ? '⚠ ' : '';
+        return `[${step}] ${warn}${e.data?.msg || ''}`;
+      });
+    logBox.textContent = lines.slice(-40).join('\n') || '（等待事件…）';
+    logBox.scrollTop = logBox.scrollHeight;
+  };
+  on('run', paint);
+
+  startBtn.addEventListener('click', async () => {
+    const usable = picked.filter(p => p.ok);
+    if (!usable.length) { toast('请先选择至少 1 张可用图片', 'warn'); return; }
+    if (!baseUrlInput.value.trim() || !modelInput.value.trim()) {
+      toast('请填写 Base URL 与模型名', 'warn');
+      return;
+    }
+    setConfig({
+      baseUrl: baseUrlInput.value.trim().replace(/\/+$/, ''),
+      apiKey: keyInput.value.trim(),
+      model: modelInput.value.trim(),
+    });
+
+    const fd = new FormData();
+    for (const p of usable) fd.append('images', p.file, p.file.name);
+    fd.append('baseUrl', state.config.baseUrl);
+    fd.append('apiKey', state.config.apiKey);
+    fd.append('model', state.config.model);
+    fd.append('title', titleInput.value.trim() || '图片生成的角色卡');
+    fd.append('hint', hintInput.value.trim());
+    fd.append('wantWorldbook', worldToggle.checked ? 'true' : 'false');
+    // 分批张数：长漫画可调；后端会 clamp 到 1..12
+    fd.append('batchSize', String(Math.max(1, Math.min(12, Number(batchInput.value) || VISION_BATCH))));
+
+    progressBox.style.display = '';
+    logBox.textContent = '（正在提交…）';
+    const r = await run.start(fd, { endpoint: '/api/image-card' });
+    if (!r.ok) toast(r.error || '启动失败', 'err');
+    paint();
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    run.cancel?.();
+    toast('已请求取消', 'warn');
+  });
+
+  page.appendChild(el('div', { class: 'card' },
+    el('h3', { text: '④ 生成' }),
+    el('div', { class: 'row' }, startBtn, cancelBtn,
+      el('button', {
+        class: 'btn ghost', type: 'button', text: '查看任务与产物',
+        onclick: () => navigate('/library'),
+      })),
+  ));
+  page.appendChild(progressBox);
+
+  refresh();
+  paint();
+}
