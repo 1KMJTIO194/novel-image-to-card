@@ -1,0 +1,7 @@
+# Bundle patch：把本插件挂进当前 profile。
+#
+# 由 `plugin_manager`（action: install_bundle）读取；**不要手写 profile 的
+# package.json 或 cordis.patch.yml** —— install_bundle 会代劳那些步骤。
+- insert:
+    - id: novel2card
+      name: dsh-plugin-novel2card

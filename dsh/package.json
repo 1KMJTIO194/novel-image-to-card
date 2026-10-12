@@ -1,0 +1,53 @@
+{
+  "name": "dsh-plugin-novel2card",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "小说 / 图片一键生成 SillyTavern 角色卡（DSH 插件）：世界书 + 酒馆助手预设 + 时间线 + MVU 变量树；支持完善已有卡与图片生成",
+  "license": "MIT",
+  "author": {
+    "name": "米德格拉伊",
+    "url": "https://github.com/1KMJTIO194"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1KMJTIO194/novel-image-to-card.git"
+  },
+  "homepage": "https://github.com/1KMJTIO194/novel-image-to-card#dsh-插件",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg"
+  ],
+  "icon": "./icon.svg",
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "sillytavern",
+    "character-card",
+    "worldbook",
+    "novel"
+  ]
+}

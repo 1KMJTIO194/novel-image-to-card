@@ -16,7 +16,7 @@
 | | |
 | --- | --- |
 | 界面结构 | 8 个页面（总览 / 生成流程 / 图片生成 / 任务与产物 / 角色卡内容 / 预设规则 / 命令参考 / 设置） |
-| 测试 | 27 个套件、2500+ 断言，全部可离线跑（`npm test`） |
+| 测试 | 30 个套件、2617 项断言，全部可离线跑（`npm test`） |
 | 依赖 | Node.js ≥ 18，6 个运行时依赖 |
 
 ---
@@ -162,6 +162,29 @@ multipart 的 `filename` 按 RFC 是 latin1 字节串，multer/busboy 逐字节�
 （只含 ≤ 0xFF、转回 UTF-8 后无替换字符、且确实含多字节序列），满足才转码。
 
 `POST /api/upload/name-probe` 可自检：上传任意文件，返回服务端实际收到的名字与修正结果。
+
+---
+
+## 也可以作为 DeepSeek Harness 插件运行
+
+除了独立 Web 版，本仓库还带一个 **DSH 插件**（`dsh/`）：在 DeepSeek Harness 的界面里
+直接生成角色卡，不用另开浏览器标签。
+
+```bash
+node tests/dsh-plugin.mjs        # 64 项：解析器 / 清单 / 宿主导出 / 客户端 bundle
+node tests/dsh-plugin-e2e.mjs    # 40 项：HTTP 端到端（真跑一次完整生成）
+```
+
+要点：
+
+- **核心 `src/` 一行没改** —— 插件复用同一套 `pipeline.js` / `augment.js` / `image_card.js`，
+  所以插件产物与本地 Web 版逐字节一致
+- 宿主侧走 `ctx.webServer.register`（路由挂在 `/novel2card/`），SSE 进度流可用
+  （DSH 的 gzip 过滤器显式豁免 `text/event-stream`）
+- 客户端是 DSH 的 `__ModuleLoader__` bundle，UI 挂到侧栏，样式只用 `--dsw-alias-*` 主题 token
+- **安装必须走 `plugin_manager` 工具或 DSH 的插件页**（`install_bundle` 代劳装包与挂载）
+
+详见 [dsh/README.md](dsh/README.md)，含路由表、数据目录与**未验证部分**的诚实说明。
 
 ---
 
@@ -415,6 +438,12 @@ public/
   js/core/preset-schema.js  预设纯逻辑：校验 / 合并 / describe / preview（前后端共用）
   js/core/             api / store / router / commands / terminal / dom / preset-manager
   js/pages/            七个页面模块
+dsh/                   DeepSeek Harness 插件（复用 src/ 的核心，产物与本地版一致）
+  index.js             宿主侧：ctx.webServer.register 挂 /novel2card/* 路由
+  client.js            浏览器侧：__ModuleLoader__ bundle，UI 挂到 sidebar.panellist
+  lib/tasks.js         任务注册表（内存 + SSE 缓冲 + 取消）
+  lib/multipart.js     自带的 multipart 解析器（宿主里没有 express/multer）
+  cordis.patch.yml     bundle 挂载声明
 tests/
   character-card.mjs   完整角色卡结构（chara_card_v3、initvar、EJS、正则）
   output-mode.mjs      输出模式（card / ab / both 的真实产物集合）
@@ -862,27 +891,42 @@ npm run test:form      # 表单规范审计 + 模型选择器 + 模块图完整�
 
 | 套件 | 断言数 | 覆盖内容 |
 | --- | --- | --- |
-| `tests/character-card.mjs` | 189 | chara_card_v3 结构、initvar 必须关闭、**initvar 根节点无 stat_data 包裹层**、EJS 未转义、**EJS 用真实引擎实际渲染**、**更新规则路径能在 initvar 里逐条取到**、**变量名含点号/空白时的路径安全**、**initvar YAML 抗特殊字符**、正则/tavern_helper、**世界书容器字段**、**insertion_order 全局唯一且内置 1–9**、**creator_notes 三件事清单**、变量规则按实际变量树展开、三种 userMode、空上下文兜底、同名去重、顶层与 data.* 一致性 |
-| `tests/data-layer.mjs` | 127 | **数据层真实故障的回归**：人物 keys 不能是 prompt 字段名、**人物名单必须吃下 LLM 的 11 种返回形态**（防"人物条目全丢"）、**主名查不到时用别名保底**、描述性称呼/机构名/幻觉名剔除、名字收敛成原文形式、历史背景与故事线分离、**时间线按叙事顺序**、**采样必须覆盖首/中/尾**、世界观占位符拦截与实质兜底、**phase 与角色阶段表对齐**、事件时间回填 |
-| `tests/chapter-range.mjs` | 38 | `parseRange` 的 `all`/`1-5`/`1,3,5-8`/越界/写反/去重/空值，`chunkText` 的范围过滤与**选中为空时明确报错**，无章节标记时的退化，`listChapters` 的 1-based 序号，两模式口径一致 |
-| `tests/augment.mjs` | 107 | 卡片校验与结构提取、initvar 解析（含坏 YAML）、**实体对齐**（别名命中/新增/冲突/失败降级）、**matched 落空退化为新增**、append/merge/overwrite 三策略、变量树合并、**角色阶段表文本层面合并且不跨 EJS 标签**、原卡扩展原样保留、版本递增、id 唯一连续 |
-| `tests/robustness.mjs` | 62 | **抽取事故回归**：`asArray` 吃下 LLM 的 7 种容器形态（**单条目对象不被误当容器**）、事件/世界观字段名与中文分类值归一化、变量树兜底（占位事件 + 主线 + **恰好一个 ongoing**）、时间线不再输出无信息量占位、世界观兜底必须含 `map_world` |
+| `tests/character-card.mjs` | 196 | chara_card_v3 结构、initvar 必须关闭、**initvar 根节点无 stat_data 包裹层**、EJS 未转义、**EJS 用真实引擎实际渲染**、**更新规则路径能在 initvar 里逐条取到**、**变量名含点号/空白时的路径安全**、**initvar YAML 抗特殊字符**、正则/tavern_helper、**世界书容器字段**、**insertion_order 全局唯一且内置 1–9**、**creator_notes 三件事清单**、变量规则按实际变量树展开、三种 userMode、空上下文兜底、同名去重、顶层与 data.* 一致性 |
+| `tests/data-layer.mjs` | 128 | **数据层真实故障的回归**：人物 keys 不能是 prompt 字段名、**人物名单必须吃下 LLM 的 11 种返回形态**（防"人物条目全丢"）、**主名查不到时用别名保底**、描述性称呼/机构名/幻觉名剔除、名字收敛成原文形式、历史背景与故事线分离、**时间线按叙事顺序**、**采样必须覆盖首/中/尾**、世界观占位符拦截与实质兜底、**phase 与角色阶段表对齐**、事件时间回填 |
+| `tests/chapter-range.mjs` | 65 | `parseRange` 的 `all`/`1-5`/`1,3,5-8`/越界/写反/去重/空值，`chunkText` 的范围过滤与**选中为空时明确报错**，无章节标记时的退化，`listChapters` 的 1-based 序号，两模式口径一致 |
+| `tests/augment.mjs` | 148 | 卡片校验与结构提取、initvar 解析（含坏 YAML）、**实体对齐**（别名命中/新增/冲突/失败降级）、**matched 落空退化为新增**、append/merge/overwrite 三策略、变量树合并、**角色阶段表文本层面合并且不跨 EJS 标签**、原卡扩展原样保留、版本递增、id 唯一连续。**含「不用标准前缀的卡」的回归**：那种卡的类型全为空，对齐器必须仍能看到全部条目并按名字合并（否则新内容会全部变成新条目） |
+| `tests/dates.mjs` | 143 | 日期解析与规范化（显式年月日优先于推断）、中文数字、相对时间、**块标题带句读时的章节匹配**、时间提及与事件的对齐、跨年推断边界 |
+| `tests/statusbar.mjs` | 267 | 状态栏 HTML 生成与校验：所有 class 必须带 `custom-` 前缀、CSS 变量不得落在 `body`/`:root`、字段路径与变量树一致、**非 ST 宏的 `{{ }}` 必须为 0**、正则隐藏规则、预览页可独立打开 |
+| `tests/batcher.mjs` | 78 | 分批切分（章数/字数先到者为准）、批次边界与断点续跑、批次状态落盘与读回、并集覆盖全部章节 |
+| `tests/merge_batches.mjs` | 68 | 分批结果归并：同分类同名去重、跨分类同名合并、**超出分类配额时合并进已有条目而不是丢弃**、报告字段 |
+| `tests/character-tiers.mjs` | 67 | 人物分层（主角/主要NPC/次要NPC/路人NPC）：按剧情占比与出章数判定、注释前缀、按层筛选与关闭 |
+| `tests/pipeline-merge.mjs` | 16 | 合并调用的开关：同一段正文只喂一次时各 Step 的传参不重不漏 |
+| `tests/robustness.mjs` | 68 | **抽取事故回归**：`asArray` 吃下 LLM 的 7 种容器形态（**单条目对象不被误当容器**）、事件/世界观字段名与中文分类值归一化、变量树兜底（占位事件 + 主线 + **恰好一个 ongoing**）、时间线不再输出无信息量占位、世界观兜底必须含 `map_world` |
 | `tests/density.mjs` | 39 | **内容密度契约**：四类 Prompt 必须含全部模板字段与防编造约束、`content_yaml`/`content`/中文键名兼容、逐字段「未提及」放行但整条空话拦截、**空壳条目（只有 name/title/type）算占位符**、事件完整正文优先且缺失时回退简洁格式 |
-| `tests/output-mode.mjs` | 82 | card / ab / both 三种模式**真实生成**后的产物集合、files 事件清单、README 随模式变化、meta/project 记录模式、默认与非法值回退 |
+| `tests/output-mode.mjs` | 90 | card / ab / both 三种模式**真实生成**后的产物集合、files 事件清单、README 随模式变化、meta/project 记录模式、默认与非法值回退 |
 | `tests/api-config.mjs` | 51 | Base URL 拼接（结尾斜杠/多级路径/漏写 `/v1`）、Authorization 头、请求体字段、模型列表两种结构、401/404/429/500/HTML/超时的可读错误、生成接口确实使用页面配置 |
 | `tests/encoding.mjs` | 84 | GBK/GB2312/Big5/Shift_JIS/Latin-1、UTF-8·UTF-16 的 BOM、低置信度警告、乱码二进制优雅回退、真值文件还原 |
 | `tests/filename-encoding.mjs` | 13 | multipart 文件名 latin1 乱码检出与修正、ASCII/已正确解码时不误伤 |
-| `tests/preset.mjs` | 70 | 合并顺序、append/replace 语义、JSON 兜底、校验告警、各 Step 传参无遗漏 |
-| `tests/progress-persist.mjs` | 39 | 切页时流不断、切回后进度完整重建、只增不减、刷新自动接上、转入后台不误判完成 |
-| `tests/launcher.mjs` | 137 | 三平台脚本齐全 / Windows 脚本纯 ASCII / Unix 分支与结构配对 / 依赖判定 / 端口探测 / zip 权限位 / `--check` 无副作用 / 交互读取不挂死 |
-| `tests/e2e.mjs` | 103 | 界面模块全部可达、生成、**character_card.json 存在于产物且 >10KB**、产物结构、任务 API、打包、命令降级、预设真的作用到 prompt |
+| `tests/preset.mjs` | 73 | 合并顺序、append/replace 语义、JSON 兜底、校验告警、各 Step 传参无遗漏 |
+| `tests/progress-persist.mjs` | 73 | 切页时流不断、切回后进度完整重建、只增不减、刷新自动接上、转入后台不误判完成 |
+| `tests/launcher.mjs` | 163 | 三平台脚本齐全 / Windows 脚本纯 ASCII / Unix 分支与结构配对 / 依赖判定 / 端口探测 / zip 权限位 / `--check` 无副作用 / 交互读取不挂死 |
+| `tests/e2e.mjs` | 188 | 界面模块全部可达、生成、**character_card.json 存在于产物且 >10KB**、产物结构、任务 API、打包、命令降级、预设真的作用到 prompt |
 | `tests/frontend-smoke.mjs` | 77 | 外壳装配、命令、补全、持久化、各页渲染、桩 SSE 生成、降级提示 |
-| `tests/jsdom-smoke.mjs` | 33 | 真实 DOM：表单值语义、querySelector、页面切换、命令面板、终端、CSS 覆盖率 |
+| `tests/jsdom-smoke.mjs` | 49 | 真实 DOM：表单值语义、querySelector、页面切换、命令面板、终端、CSS 覆盖率 |
 | `tests/preset-ui.mjs` | 48 | 预设卡片：导入/编辑/实时校验/replace 确认/预览弹层/生成时提交 |
-| `tests/form-audit.mjs` | 62 | 模块图可解析性（防白屏）、逐页 ID/name/label、按钮 type、模型选择器状态与交互 |
+| `tests/form-audit.mjs` | 85 | 模块图可解析性（防白屏）、逐页 ID/name/label、按钮 type、模型选择器状态与交互 |
+| `tests/image-card.mjs` | 119 | 图片 → 卡：视觉可用性判据（含真实模型的拒答原文回归）、短地名、**长漫画分批**（上限 60、批次切分、`imageOffset` 全局图号、跨批去重、空批次告警） |
+| `tests/summary.mjs` | 66 | 变更总结：完善的前后差异、从零生成的产出清单、零变化时给原因、真实报告字段对齐、分类计数不可用时**不显示误导的 0** |
+| `tests/card-doctor.mjs` | 51 | 成卡体检与无损优化：空壳/同名/key 冲突/常驻预算；**只删无 keys 的空壳**，有 keys 的只报告；合并保留两边正文 |
+| `tests/dsh-plugin.mjs` | 64 | DSH 插件：multipart 解析（二进制逐字节）、清单/补丁/图标/语言包约定、宿主导出形态、**客户端 bundle 在 vm + 假 React 里实际执行** |
+| `tests/dsh-plugin-e2e.mjs` | 40 | DSH 插件 HTTP 端到端：路由挂真服务器 + 假 LLM，跑完整「小说 → 角色卡」，含 SSE、产物下载、目录穿越拦截、取消 |
 
-合计 **1463 项断言**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
+合计 **2617 项断言 / 30 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
 找不到引擎时会打印跳过提示而不失败，可用 `EJS_PATH` 环境变量指向任意 ejs 副本。
+
+> `tests/output-mode.mjs`、`api-config.mjs`、`filename-encoding.mjs`、`e2e.mjs` 里有几条断言
+> 会请求 `127.0.0.1:3000` 上的本地服务 —— **没有服务在跑时它们会失败**（`ECONNREFUSED`），
+> 这不是代码回归。先 `npm start` 再跑全量即可。
 
 另外三份**针对性核验脚本**（不进 `npm test`，前两份需要服务器在 3000 端口运行）——
 它们不看测试绿不绿，而是把真实生成的 `character_card.json` 拆开逐字段核验：

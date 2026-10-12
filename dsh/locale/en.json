@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Character Card Generator",
+    "description": "Turn a novel or images into a SillyTavern character card: worldbook, tavern-helper preset, timeline and MVU variable tree. Supports augmenting an existing card and generating from images."
+  }
+}
