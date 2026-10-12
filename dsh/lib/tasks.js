@@ -8,6 +8,7 @@
  */
 import { mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { importCore } from './loader.js';
 
 /** 任务表（进程内；插件重载后丢失，产物仍在磁盘上） */
 const jobs = new Map();
@@ -102,7 +103,7 @@ export async function startGenerate(job, {
   // 高级项，与本地版同名同义
   options = {},
 }) {
-  const { runPipeline } = await import('../../src/pipeline.js');
+  const { runPipeline } = await importCore('pipeline.js');
 
   let srcPath = novelPath;
   if (!srcPath) {
@@ -152,7 +153,7 @@ export async function startAugment(job, {
   cardPath, novelText, novelPath = null, strategy = 'merge',
   baseUrl, apiKey, model, chapterRange = 'all', preset = null, options = {},
 }) {
-  const { runAugment } = await import('../../src/augment.js');
+  const { runAugment } = await importCore('augment.js');
 
   let srcPath = novelPath;
   if (!srcPath && novelText) {
@@ -191,7 +192,7 @@ export async function startImageCard(job, {
   const {
     extractCharactersFromImages, buildCardFromExtraction, writeImageCardOutputs, summarizeCard,
     DEFAULT_VISION_BATCH, DEFAULT_VISION_CONCURRENCY,
-  } = await import('../../src/image_card.js');
+  } = await importCore('image_card.js');
 
   const emit = job.emit;
   emit('start', { taskId: job.taskId, startedAt: job.startedAt });

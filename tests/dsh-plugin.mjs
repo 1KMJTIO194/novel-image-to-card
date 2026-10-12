@@ -12,7 +12,8 @@
  * 不做的事：真的装进 DSH、真的跑生成（那需要模型与宿主，见 README 的说明）。
  */
 import path from 'node:path';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, mkdtemp, mkdir, writeFile, cp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 
@@ -247,6 +248,90 @@ console.log('\n【4】客户端 bundle 在模拟宿主里实际执行');
       JSON.stringify((src.match(/className:\s*'([^']+)'/g) || []).slice(0, 5)));
     ok('没有写 document.body（文档明令禁止）', !/document\.body/.test(src), '');
     ok('没有用 iframe 承载宿主页面', !/<iframe/i.test(src), '');
+  }
+}
+
+// ============================================================
+console.log('\n【7】核心目录解析（安装位置不确定 + 中文路径）');
+{
+  const L = await import(pathToFileURL(path.join(DSH, 'lib/loader.js')).href);
+
+  // ① 在仓库里（开发时 / pnpm link: 软链回仓库）
+  const r1 = L.describeResolution();
+  ok('在仓库里能解析到 src/', r1.srcDir === path.join(ROOT, 'src'), JSON.stringify(r1));
+  const core = await L.importCore('utils.js');
+  ok('能真的 import 核心模块（不是路径对但加载不了）',
+    typeof core.chunkText === 'function', typeof core.chunkText);
+
+  /**
+   * ② 被复制到别处时应**明确失败**，而不是碰巧成功。
+   *
+   * 这条曾经抓到过一个设计缺陷：loader 里原本有 `process.cwd()/src` 兜底，
+   * 而开发时 cwd 恰好是仓库根 —— 于是"复制安装"被误判成成功，
+   * 测试全绿，到了真实宿主（cwd 与仓库无关）才找不到。
+   * 所以刻意去掉了那个兜底。
+   */
+  {
+    const tmp = await mkdtemp(path.join(tmpdir(), 'n2c-copy-'));
+    try {
+      const dest = path.join(tmp, 'dsh-plugin-novel2card');
+      await cp(path.join(DSH), dest, { recursive: true });
+      const m2 = await import(pathToFileURL(path.join(dest, 'lib/loader.js')).href + '?copy=1');
+      const r2 = m2.describeResolution();
+      ok('复制到别处后找不到 src（预期失败，不误判成功）',
+        r2.srcDir === null, JSON.stringify(r2));
+      let msg = '';
+      try { await m2.importCore('pipeline.js'); } catch (e) { msg = e.message; }
+      ok('报错说明了三条可操作办法',
+        /NOVEL2CARD_SRC/.test(msg) && /软链/.test(msg), msg.split('\n').slice(0, 2).join(' / '));
+
+      // ③ 环境变量兜底
+      process.env.NOVEL2CARD_SRC = path.join(ROOT, 'src');
+      const m3 = await import(pathToFileURL(path.join(dest, 'lib/loader.js')).href + '?env=1');
+      const r3 = m3.describeResolution();
+      ok('NOVEL2CARD_SRC 能兜底', r3.srcDir === path.join(ROOT, 'src') && r3.fromEnv === true,
+        JSON.stringify(r3));
+      const c3 = await m3.importCore('utils.js');
+      ok('环境变量兜底后能真的加载', typeof c3.chunkText === 'function');
+    } finally {
+      delete process.env.NOVEL2CARD_SRC;
+      await rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * ④ 含非 ASCII 的路径。
+   *
+   * 这条是真 bug 的回归：`import(new URL('file://' + path))` 这种手工拼法
+   * 在中文目录下直接抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`。
+   * 而本项目最典型的路径就是 `D:\角色卡生成器`，必踩。
+   * 修法是改用 `pathToFileURL`。
+   *
+   * 注意这里只放 `probe.js`（没有 pipeline.js），所以断言要针对 probe：
+   * 加载器找的是「**包含当前要 import 的那个文件**」的目录，
+   * 不是某个固定哨兵文件。
+   */
+  {
+    const tmp = await mkdtemp(path.join(tmpdir(), 'n2c-中文路径-'));
+    try {
+      const repo = path.join(tmp, '仓库', '角色卡');
+      await mkdir(path.join(repo, 'src'), { recursive: true });
+      await mkdir(path.join(repo, 'dsh', 'lib'), { recursive: true });
+      await writeFile(path.join(repo, 'src', 'probe.js'), 'export const ok = true;\n', 'utf-8');
+      await cp(path.join(DSH, 'lib', 'loader.js'), path.join(repo, 'dsh', 'lib', 'loader.js'));
+      const m4 = await import(pathToFileURL(path.join(repo, 'dsh/lib/loader.js')).href + '?zh=1');
+
+      ok('中文路径下能定位到 probe.js 所在的 src/',
+        m4.resolveSrcDir('probe.js') === path.join(repo, 'src'),
+        JSON.stringify(m4.resolveSrcDir('probe.js')));
+      const c4 = await m4.importCore('probe.js');
+      ok('中文路径下能加载（手工拼 file:// 会在这里挂）', c4.ok === true, String(c4.ok));
+      ok('没有的文件仍然报告找不到（不是"什么都算找到"）',
+        m4.resolveSrcDir('pipeline.js') === null,
+        JSON.stringify(m4.resolveSrcDir('pipeline.js')));
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 

@@ -31,7 +31,21 @@
 DSH 的插件只能通过 **`plugin_manager` 工具**或 **Web 界面的插件页**安装
 （`install_bundle` 会代劳装包与挂载，**不要**手写 profile 的 `package.json` 或 `cordis.patch.yml`）。
 
-### 方式一：让 DSH agent 装（最省事）
+### 方式一：Web 界面插件页（最直观）
+
+侧栏 → 设置 → 插件 → 安装，在输入框里填**本地目录路径**：
+
+```
+D:\角色卡生成器\dsh
+```
+
+> ⚠️ **要填 `dsh` 子目录，不是仓库根目录。**
+> bundle 的清单（`package.json` 里的 `dsh.bundle.patch`）在 `dsh/` 里；
+> 仓库根的 `package.json` 没有 `dsh` 字段，填根目录会报"不是 bundle"。
+
+安装源有「默认 / 中国大陆镜像源」两个选项 —— 本地目录安装不联网，选哪个都一样。
+
+### 方式二：让 DSH agent 装
 
 在 DSH 里说：
 
@@ -39,9 +53,48 @@ DSH 的插件只能通过 **`plugin_manager` 工具**或 **Web 界面的插件�
 
 它会调 `plugin_manager` 的 `install_bundle`，`target` 填该目录的绝对路径。
 
-### 方式二：Web 界面插件页
+---
 
-侧栏 → 设置 → 插件 → 安装 bundle → 选 `D:\角色卡生成器\dsh` 目录。
+## 一个必须知道的依赖：插件要能找到仓库的 `src/`
+
+插件**复用**仓库的核心流程（`src/pipeline.js` / `augment.js` / `image_card.js`），
+而不是复制一份。所以它得知道 `src/` 在哪。`lib/loader.js` 按优先级找：
+
+| 顺序 | 候选 | 适用场景 |
+| --- | --- | --- |
+| ① | `<插件>/../../src` | 插件还在仓库里（**pnpm 对本地目录默认用 `link:` 软链**，真实路径仍在仓库） |
+| ② | `<插件>/../src` | 插件被复制到别处，但 `src/` 就在它旁边 |
+| ③ | `$NOVEL2CARD_SRC` | 环境变量显式指定 |
+
+**刻意没有做 `process.cwd()/src` 兜底。** 试过，然后去掉了：开发时 cwd 恰好是仓库根，
+于是"复制安装"也会被误判成成功 —— 测试全绿，到真实宿主里（cwd 与仓库无关）才找不到。
+宁可明确失败，也不要一个碰巧能用的假象。
+
+**怎么判断有没有找到**：`GET /novel2card/meta` 会报出来（也可以在 DSH 里直接访问该地址）：
+
+```json
+{
+  "core": {
+    "pluginDir": "D:\\角色卡生成器\\dsh",
+    "srcDir": "D:\\角色卡生成器\\src",
+    "ok": true
+  }
+}
+```
+
+`ok: false` 时 `hint` 会给出三条可操作办法。任务报错也会直接说清是哪个文件、该怎么做，
+而不是一个看不懂的 `ENOENT`。
+
+> **本机这次的情况**：`install_bundle` 对本地目录用 pnpm 的 `link:`，
+> 所以插件真实路径仍在 `D:\角色卡生成器\dsh`，①命中了，`src/` 正常。
+
+### 万一被复制了（②③ 都没命中）
+
+任选其一：
+
+1. 设环境变量 `NOVEL2CARD_SRC=D:\角色卡生成器\src`
+2. 把仓库的 `src/` 复制到插件目录旁（即 `<插件>/../src`）
+3. 改用软链安装，让插件目录留在仓库内
 
 ---
 
@@ -102,13 +155,19 @@ $DSH_HOME/novel2card/
 ## 测试
 
 ```
-node tests/dsh-plugin.mjs        # 64 项：解析器 / 清单 / 宿主导出 / 客户端 bundle
+node tests/dsh-plugin.mjs        # 73 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析
 node tests/dsh-plugin-e2e.mjs    # 40 项：HTTP 端到端（含真跑一次完整生成）
 ```
 
 **`dsh-plugin.mjs` 里最有价值的一条**：把 `client.js` 放进 `vm` + 假 React 里**实际执行一遍**。
 客户端 bundle 要是有语法错或引用了未定义的东西，在浏览器里会直接让整个 slot 崩掉
 （控制台：`slot entry crashed in '<slot>'`），而 Node 里完全看不出来 —— 所以必须真跑。
+
+它还在三种安装形态下实测了核心目录解析：在仓库里（link 软链）、
+被复制到别处（应**明确失败**而不是碰巧成功）、环境变量兜底，
+外加**中文路径**（`D:\角色卡生成器` 就是中文目录）。
+后面这条抓到过一个真 bug：`import(new URL('file://' + path))` 这种手工拼法
+在中文路径下直接抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`，改用 `pathToFileURL` 才对。
 
 **`dsh-plugin-e2e.mjs`** 把插件的路由真挂到一个 HTTP 服务器上，再用一个**假的 OpenAI 兼容端点**
 当 LLM，跑完整的「小说 → 角色卡」：
@@ -120,7 +179,7 @@ POST /novel2card/generate (multipart)
   → 下载 / 目录穿越被拒 / 取消 / 删除
 ```
 
-这一层抓到过一个真 bug：对**已完成**的任务订阅 SSE 时，
+这一层也抓到过一个真 bug：对**已完成**的任务订阅 SSE 时，
 原来先 `res.end()` 再继续回放历史事件，抛出 `ERR_STREAM_WRITE_AFTER_END`
 （未捕获会打挂宿主进程）—— 用户表现是"打开一个历史任务就崩"。
 现在结束信号只由缓冲里的 `__end` 驱动，且幂等。
@@ -131,12 +190,13 @@ POST /novel2card/generate (multipart)
 
 | 项 | 状态 |
 | --- | --- |
-| 装进真实 DSH profile | ❌ **没装过**。本会话审批被禁用，`plugin_manager` 的每个动作都被自动拒绝，装不了 |
+| 装进真实 DSH profile | ❌ **没装过**。第一次尝试时本会话审批被禁用，`plugin_manager` 的每个动作都被自动拒绝 |
 | 浏览器里的实际渲染 | ❌ 没看过。侧栏入口与右侧栏面板在真实 DSH 里的样子、`sidebar.panellist` 的 props、`layout.openRightbar` 的可用性都**未经实证** |
 | `ctx.webServer` 之外的服务名 | ⚠️ 只注入 `webServer`；`layout` 是运行时 `ctx.get('layout')` 取的，拿不到时点击不会打开面板（控制台有 warn） |
 | 图片任务 | ⚠️ 路由与逻辑都写了，但端到端只测了小说路径 |
 | 宿主进程里的 express/multer | ✅ 没用到 —— multipart 自己解析（`lib/multipart.js`），不新增依赖 |
 
-**如果侧栏入口没出现或点不开**，最先要看浏览器控制台有没有
+**如果侧栏入口没出现或点不开**，最先看浏览器控制台有没有
 `slot entry crashed` 或 `layout.openRightbar 不可用` —— 前者说明 slot 名或组件有问题，
 后者说明 `layout` 服务名不对。这两处是本插件最可能需要按版本微调的地方。
+再看 `GET /novel2card/meta` 的 `core.ok` 是否为 true（核心目录有没有找到）。

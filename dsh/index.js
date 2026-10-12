@@ -118,10 +118,12 @@ export function apply(ctx) {
     ctx.effect(() => ctx.webServer.register({ kind, path, handler: guard(handler) }), `novel2card:${path}`);
   };
 
-  // 1) 能力探测
+  // 1) 能力探测（顺带把核心目录解析结果报出来，安装出问题时一眼能看到）
   route('exact', '/novel2card/meta', async (req, res) => {
     if (req.method !== 'GET') return sendJson(res, 405, { error: '只支持 GET' });
     const pkg = await import('./package.json', { with: { type: 'json' } }).catch(() => ({ default: {} }));
+    const { describeResolution } = await import('./lib/loader.js');
+    const resolved = describeResolution();
     sendJson(res, 200, {
       ok: true,
       name: 'novel2card',
@@ -129,6 +131,13 @@ export function apply(ctx) {
       dataDir: baseDir,
       kinds: ['generate', 'augment', 'image-card'],
       limits: { maxUploadBytes: 64 * 1024 * 1024 },
+      // 插件复用仓库的 src/ 核心；这里报出实际解析到的位置
+      core: {
+        ...resolved,
+        ok: !!resolved.srcDir,
+        hint: resolved.srcDir ? undefined
+          : '未找到核心 src/ —— 设 NOVEL2CARD_SRC 指到仓库的 src 目录，或用软链安装',
+      },
     });
   });
 
