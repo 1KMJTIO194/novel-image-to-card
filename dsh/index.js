@@ -20,12 +20,15 @@ import {
   listArtifacts, readArtifact,
 } from './lib/tasks.js';
 import { getBoundary, readBody, parseMultipart, collectMultipart } from './lib/multipart.js';
+import { requestRejection } from './lib/guard.js';
 
 export const name = 'novel2card';
 
 /**
- * 只声明 `webServer`：
- * DSH 没有 `webServer` 时本插件保持不激活，而不是抛错。
+ * 声明 `webServer` 与 `connection`：
+ *   · `webServer` 必需 —— 没有它本插件保持不激活，而不是抛错
+ *   · `connection` 提供信任栅栏 `requestRejection`，用来挡住非授权请求
+ *     （它本身是可选的：拿不到时 `lib/guard.js` 会回落到自带校验）
  * （模型的 baseUrl/apiKey 由面板传入，不复用宿主 LLM 服务 —— 见 README「与 DSH 的关系」。）
  */
 export const inject = ['webServer'];
@@ -114,8 +117,46 @@ function guard(handler) {
 export function apply(ctx) {
   const baseDir = dataRoot();
 
+  /**
+   * 宿主信任栅栏。
+   *
+   * `connection.requestRejection(req)` 是 DSH 自己的请求校验（它知道 `--trusted-host`）。
+   * 取不到时（服务缺失或旧版本）`lib/guard.js` 会回落到插件自带的
+   * 回环 / 跨站 / 同源校验，仍然挡得住。
+   */
+  let fence = null;
+  try {
+    const conn = ctx.get ? ctx.get('connection') : null;
+    if (conn && typeof conn.requestRejection === 'function') fence = conn;
+  } catch { /* 保持 null，走自带校验 */ }
+  if (!fence) {
+    try {
+      console.warn('[novel2card] 未拿到宿主信任栅栏（connection.requestRejection 缺失）：'
+        + '已启用插件自带的回环 / 跨站 / 同源校验。');
+    } catch { /* 忽略 */ }
+  }
+
   const route = (kind, path, handler) => {
-    ctx.effect(() => ctx.webServer.register({ kind, path, handler: guard(handler) }), `novel2card:${path}`);
+    ctx.effect(() => ctx.webServer.register({
+      kind,
+      path,
+      /**
+       * ⚠️ 每条路由都必须过栅栏。
+       *
+       * 实测过：DSH 自己的路由对非授权请求返回 401，而**插件注册的路由
+       * 完全不受那套校验保护** —— `/novel2card/meta` 返回 200 而同源的应用路由返回 401。
+       * 本插件还要接收 API Key（generate）和读出用户小说产物（file），
+       * 所以这里挡不住就等于把凭据和内容敞开。
+       */
+      handler: guard(async (req, res) => {
+        const deny = requestRejection(req, { fence });
+        if (deny !== null) {
+          res.writeHead(deny, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ error: '请求未通过信任校验（仅限本机 / 同源）' }));
+        }
+        return handler(req, res);
+      }),
+    }), `novel2card:${path}`);
   };
 
   // 1) 能力探测（顺带把核心目录解析结果报出来，安装出问题时一眼能看到）

@@ -424,6 +424,75 @@ console.log('\n【6】取消路径');
 }
 
 // ============================================================
+console.log('\n【7】信任栅栏：非本机 / 跨站请求必须被拒');
+{
+  /**
+   * 实测发现的问题：DSH 自己的路由对非授权请求返回 401，
+   * 而**插件注册的路由完全不受那套校验保护** ——
+   * 实测 `GET /` → 401 而 `GET /novel2card/meta` → 200。
+   *
+   * 本插件风险尤其实在：generate 接收 API Key、file 能读出用户小说产物。
+   * 所以每条路由都要过 `lib/guard.js`。
+   *
+   * 这里**不带 fence**（模拟"宿主栅栏不可用"），验证自带校验是否足够。
+   */
+  /**
+   * ⚠️ 必须用 `http.request` 而不是 `fetch` 来测这一节。
+   *
+   * `fetch`（undici）会**忽略调用方设置的 `Host` 头** —— 它是 forbidden header，
+   * 由运行时自己重写。所以用 fetch 伪造 Host 测栅栏是测不出来的
+   *（第一版就是这么写的，结果所有用例都是 200/404，看起来像栅栏没生效）。
+   */
+  const rawGet = (opts = {}) => new Promise((resolve) => {
+    const req = http.request({
+      host: '127.0.0.1', port: SRV_PORT,
+      path: opts.path || '/novel2card/meta',
+      method: opts.method || 'GET',
+      headers: {
+        Host: opts.host ?? '127.0.0.1:3222',
+        ...(opts.origin ? { Origin: opts.origin } : {}),
+        ...(opts.fetchSite ? { 'Sec-Fetch-Site': opts.fetchSite } : {}),
+        ...(opts.method === 'POST' ? { 'Content-Type': 'application/json', 'Content-Length': 2 } : {}),
+      },
+    }, (res) => {
+      res.resume();
+      res.on('end', () => resolve({ status: res.statusCode }));
+    });
+    req.on('error', () => resolve({ status: 0 }));
+    if (opts.method === 'POST') req.write('{}');
+    req.end();
+  });
+
+  ok('本机请求通过', (await rawGet()).status === 200);
+  ok('localhost 也算本机', (await rawGet({ host: 'localhost:3222' })).status === 200);
+  ok('127.0.0.53（127/8 全段）也算本机',
+    (await rawGet({ host: '127.0.0.53:3222' })).status === 200);
+  ok('Sec-Fetch-Site: cross-site 被拒',
+    (await rawGet({ fetchSite: 'cross-site' })).status === 403);
+  ok('Origin 与 Host 不同源被拒',
+    (await rawGet({ origin: 'http://evil.example' })).status === 403);
+  ok('Origin 与 Host 同源通过',
+    (await rawGet({ origin: 'http://127.0.0.1:3222' })).status === 200);
+  ok('127.0.0.1.evil.com 不被当成本机（逐段校验，不是 startsWith）',
+    (await rawGet({ host: '127.0.0.1.evil.com:3222' })).status === 403);
+  ok('128.0.0.1 不算本机', (await rawGet({ host: '128.0.0.1:3222' })).status === 403);
+  ok('非本机 Host 的读请求在无栅栏时也被拒（fail-closed）',
+    (await rawGet({ host: '192.168.1.50:3222' })).status === 403);
+  ok('非本机 Host 的写请求被拒',
+    (await rawGet({ method: 'POST', host: '192.168.1.50:3222', path: '/novel2card/generate' })).status === 403);
+
+  // 所有路由都受保护，不是只有 meta
+  for (const [m, p] of [
+    ['GET', '/novel2card/meta'], ['GET', '/novel2card/tasks'], ['GET', '/novel2card/task?id=x'],
+    ['GET', '/novel2card/stream?id=x'], ['GET', '/novel2card/file?id=x&name=y'],
+    ['POST', '/novel2card/cancel'], ['POST', '/novel2card/remove'], ['POST', '/novel2card/generate'],
+  ]) {
+    const r = await rawGet({ method: m, path: p, host: '192.168.1.50:3222' });
+    ok(`${m} ${p.split('?')[0]} 受保护`, r.status === 403, String(r.status));
+  }
+}
+
+// ============================================================
 // 收尾
 await new Promise(r => server.close(r));
 await new Promise(r => mockLLM.close(r));

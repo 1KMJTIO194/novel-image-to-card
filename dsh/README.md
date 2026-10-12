@@ -98,6 +98,39 @@ D:\角色卡生成器\dsh
 
 ---
 
+## 信任栅栏（安全）
+
+**DSH 自己的路由对非授权请求返回 401，但插件注册的路由不受那套校验保护。** 实测：
+
+```
+GET /                    → 401   ← DSH 应用路由
+GET /novel2card/meta     → 200   ← 插件路由，默认没人看门
+```
+
+本插件的风险很实在：`POST /generate` 接收 **API Key** 且 `baseUrl` 由调用方指定，
+`GET /file` 能读出已生成的角色卡（含你小说里的内容）。
+若 DSH 部署在非回环地址（反代 / 局域网 / `0.0.0.0`），
+任何能访问该端口的人都能借这台机器跑生成并把请求发往自己的服务器 —— **等于凭据外带**。
+
+所以每条路由都过 `lib/guard.js`，三层判定，全部 **fail-closed**（校验器自身出错按拒绝处理）：
+
+| 层 | 规则 |
+| --- | --- |
+| ① 本机判定 | Host 必须是回环（`localhost` / `*.localhost` / `::1` / `127.0.0.0/8` **逐段**校验）。**写请求强制**；读请求在宿主栅栏可用时交给它判 |
+| ② 跨站判定 | `Sec-Fetch-Site: cross-site`、或 `Origin` 与 `Host` 不同源 → 一律拒（防"任意网页 fetch localhost"） |
+| ③ 委托宿主 | `connection.requestRejection(req)` —— 它知道 DSH 自己的 `--trusted-host`；它抛异常按拒绝处理 |
+
+> `127.0.0.0/8` 用的是**逐段校验**而不是 `startsWith('127.')` ——
+> 后者会放过 `127.0.0.1.evil.com` 这类相似域名（有测试钉住这条）。
+
+部署在反代后面又确实需要远端使用时，显式声明：
+
+```bash
+NOVEL2CARD_TRUSTED_HOSTS=card.example.com,192.168.1.9:19387
+```
+
+---
+
 ## 路由
 
 全部挂在 `/novel2card/` 前缀下。**命名空间是硬要求**：DSH 的路由表里重复 `(kind, path)` 会直接抛错。
@@ -156,7 +189,7 @@ $DSH_HOME/novel2card/
 
 ```
 node tests/dsh-plugin.mjs        # 73 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析
-node tests/dsh-plugin-e2e.mjs    # 40 项：HTTP 端到端（含真跑一次完整生成）
+node tests/dsh-plugin-e2e.mjs    # 58 项：HTTP 端到端 + 信任栅栏
 ```
 
 **`dsh-plugin.mjs` 里最有价值的一条**：把 `client.js` 放进 `vm` + 假 React 里**实际执行一遍**。
@@ -179,10 +212,19 @@ POST /novel2card/generate (multipart)
   → 下载 / 目录穿越被拒 / 取消 / 删除
 ```
 
-这一层也抓到过一个真 bug：对**已完成**的任务订阅 SSE 时，
-原来先 `res.end()` 再继续回放历史事件，抛出 `ERR_STREAM_WRITE_AFTER_END`
-（未捕获会打挂宿主进程）—— 用户表现是"打开一个历史任务就崩"。
-现在结束信号只由缓冲里的 `__end` 驱动，且幂等。
+这一层也抓到过两个真 bug：
+
+1. **对已完成的任务订阅 SSE** 时，原来先 `res.end()` 再继续回放历史事件，抛出
+   `ERR_STREAM_WRITE_AFTER_END`（未捕获会打挂宿主进程）—— 用户表现是"打开一个历史任务就崩"。
+   现在结束信号只由缓冲里的 `__end` 驱动，且幂等。
+2. **安全测试第一版是假绿的**：用 `fetch` 伪造 `Host` 头来测栅栏，
+   而 `fetch`（undici）会**忽略调用方设置的 `Host`**（forbidden header，运行时自己重写）——
+   所有用例都返回 200/404，看起来像"栅栏没生效"，实际是压根没测到。
+   改用 `http.request` 才真正验证了栅栏。
+
+栅栏的测试覆盖：本机放行 / `localhost` 放行 / `127.0.0.53` 放行（整段 127/8）/
+跨站拒绝 / 跨源拒绝 / `127.0.0.1.evil.com` 拒绝 / `128.0.0.1` 拒绝 /
+非本机读写都拒绝 / **全部 8 条路由逐条验证受保护**。
 
 ---
 
@@ -190,9 +232,11 @@ POST /novel2card/generate (multipart)
 
 | 项 | 状态 |
 | --- | --- |
-| 装进真实 DSH profile | ❌ **没装过**。第一次尝试时本会话审批被禁用，`plugin_manager` 的每个动作都被自动拒绝 |
+| 装进真实 DSH profile | ✅ **已装上并验证**：`node_modules/dsh-plugin-novel2card` 是 Junction → `D:\角色卡生成器\dsh`；`GET /novel2card/meta` 返回 200，`core.ok: true` |
+| 生成流程（小说 → 卡） | ✅ HTTP 层端到端跑通（真服务器 + 假 LLM），产出的 `character_card.json` 结构校验通过 |
+| 信任栅栏 | ✅ 8 条路由逐条验证；**但宿主重启前的实测仍是 200**，需重启后才真正生效（Node 模块缓存） |
 | 浏览器里的实际渲染 | ❌ 没看过。侧栏入口与右侧栏面板在真实 DSH 里的样子、`sidebar.panellist` 的 props、`layout.openRightbar` 的可用性都**未经实证** |
-| `ctx.webServer` 之外的服务名 | ⚠️ 只注入 `webServer`；`layout` 是运行时 `ctx.get('layout')` 取的，拿不到时点击不会打开面板（控制台有 warn） |
+| `ctx.webServer` 之外的服务名 | ⚠️ 只注入 `webServer`；`connection` 与 `layout` 都是运行时 `ctx.get()` 取的，拿不到时会回落（栅栏回落自带校验、布局回落为不打开面板 + console.warn） |
 | 图片任务 | ⚠️ 路由与逻辑都写了，但端到端只测了小说路径 |
 | 宿主进程里的 express/multer | ✅ 没用到 —— multipart 自己解析（`lib/multipart.js`），不新增依赖 |
 
