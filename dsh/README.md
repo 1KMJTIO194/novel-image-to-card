@@ -10,8 +10,8 @@
 
 ## 它长什么样
 
-- 侧栏出现一个入口「🃏 角色卡生成」
-- 点开是右侧栏面板，三个页签：**小说 → 卡** / **完善已有卡** / **图片 → 卡**
+- 侧栏出现一个「🃏」图标，标签「角色卡生成」
+- 点它切到**中央面板**，三个页签：**小说 → 卡** / **完善已有卡** / **图片 → 卡**
 - 面板内：接口设置（可折叠）、角色卡名称、文本/文件输入、进度条与实时日志
 - 跑完列出产物，`character_card.json` 可一键下载
 
@@ -20,9 +20,45 @@
 | 部分 | 做法 |
 | --- | --- |
 | 宿主侧 `index.js` | `export const inject = ['webServer']` + `export function apply(ctx)`；路由走 `ctx.webServer.register({ kind:'exact', path, handler(req,res) })` |
-| 客户端 `client.js` | `window.__ModuleLoader__.load({ id, factory })`，React 由宿主提供，**不用 JSX**（无构建步骤），UI 挂到 `sidebar.panellist` |
+| 客户端 `client.js` | `window.__ModuleLoader__.load({ id, factory })`，React 由宿主提供，**不用 JSX**（无构建步骤） |
+| UI 接线 | `main`（中央面板，keyed）+ `sidebar.panellist`（侧栏图标，list），两者用**同一个字符串**对接（见下） |
 | 样式 | 只用主题 token `--dsw-alias-*`，类名统一 `n2c-` 前缀 |
 | 生命周期 | 每个注册都在 `ctx.effect()` 里并返回 disposer；插件卸载后路由与 UI 一起消失 |
+
+### UI 接线（踩过的坑，写清楚）
+
+DSH 的面板**不是**靠"打开右侧栏"实现的，而是靠两条注册 + 一个共享标识。官方槽位目录原文：
+
+| 槽位 | 类型 | 原文 |
+| --- | --- | --- |
+| `main` | keyed | Central panel **selected by sidebar entry id** |
+| `sidebar.panellist` | list | Each list **id addresses the matching main panel**；the sidebar owns the button |
+
+所以必须这样接：
+
+```js
+const PANEL_KEY = 'novel2card';
+
+// ① 中央面板
+ctx.slots.inject('main', () => ctx.slots.register(
+  { name: 'main', key: PANEL_KEY }, Panel));
+
+// ② 侧栏图标（id = 上面那个 key）
+ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
+  { name: 'sidebar.panellist', id: PANEL_KEY, order: 20, label: () => '角色卡生成' },
+  SidebarIcon));
+```
+
+> **第一版就是在这里错的**：只注册了 `sidebar.panellist`，id 还随便起了个
+> `novel2card-entry`，然后用 `ctx.layout.openRightbar(openPanel, false)` 想"打开右侧栏"。
+> 而真实签名是 `openRightbar(track: boolean, fullscreen: boolean)` ——
+> 第一个参数是**布尔值**（"普通宽度是否占一个网格轨道"），传进去的函数被塞进布尔字段，
+> **没有任何东西会渲染**。用户看到的就是：侧栏有图标，点开全空。
+>
+> 现在有测试钉住这条契约：**`main.key` 必须等于 `sidebar.panellist.id`**。
+
+`inject` 只声明 `slots` —— `layout` **不放进 inject**，否则在没有 layout 服务的组合里
+整个条目都不会激活，侧栏图标也不会出现。
 
 ---
 
@@ -188,7 +224,7 @@ $DSH_HOME/novel2card/
 ## 测试
 
 ```
-node tests/dsh-plugin.mjs        # 73 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析
+node tests/dsh-plugin.mjs        # 82 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析
 node tests/dsh-plugin-e2e.mjs    # 58 项：HTTP 端到端 + 信任栅栏
 ```
 

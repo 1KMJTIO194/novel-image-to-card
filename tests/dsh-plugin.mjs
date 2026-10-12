@@ -219,26 +219,57 @@ console.log('\n【4】客户端 bundle 在模拟宿主里实际执行');
 
     // 用假 ctx 跑 apply，确认注册进 slot
     const slotRegs = [];
+    const injectOwners = [];
     const fakeCtx = {
       get: () => null,
       slots: {
-        inject: (owner, cb) => { ok('slots.inject 的 owner 是 sidebar.panellist', owner === 'sidebar.panellist', owner); cb(); },
+        inject: (owner, cb) => { injectOwners.push(owner); cb(); },
         register: (opts, comp) => { slotRegs.push({ opts, comp }); return () => {}; },
       },
     };
     let applyThrown = null;
     try { mod.apply(fakeCtx); } catch (e) { applyThrown = e; }
     ok('apply 不抛错', !applyThrown, applyThrown ? applyThrown.message : '');
-    ok('注册了 1 个 slot 条目', slotRegs.length === 1, String(slotRegs.length));
-    ok('slot 名与注册名匹配',
-      slotRegs[0]?.opts?.name === 'sidebar.panellist' && slotRegs[0]?.opts?.id === 'novel2card-entry',
-      JSON.stringify(slotRegs[0]?.opts));
-    ok('注册的是组件（函数）', typeof slotRegs[0]?.comp === 'function');
+    ok('slots.inject 的 owner 是 main 与 sidebar.panellist',
+      injectOwners.includes('main') && injectOwners.includes('sidebar.panellist'),
+      JSON.stringify(injectOwners));
 
-    // 渲染侧栏入口组件，确认产出真实的 React 元素树
+    /**
+     * 注册必须是**两条**，而且 key/id 必须一致 —— 这是 DSH 的接线机制：
+     *   main（keyed）：「Central panel selected by sidebar entry id」
+     *   sidebar.panellist（list）：「Each list id addresses the matching main panel」
+     * 只注册侧栏图标（之前那样）会得到一个"能点但点开是空的"的按钮。
+     */
+    const mainReg = slotRegs.find(r => r.opts?.name === 'main');
+    const sideReg = slotRegs.find(r => r.opts?.name === 'sidebar.panellist');
+    ok('注册了 main 面板与侧栏图标两条', slotRegs.length === 2, JSON.stringify(slotRegs.map(r => r.opts?.name)));
+    ok('main 注册带 key', !!mainReg?.opts?.key, JSON.stringify(mainReg?.opts));
+    ok('侧栏注册带 id', !!sideReg?.opts?.id, JSON.stringify(sideReg?.opts));
+    ok('**main.key 与 panellist.id 完全相同**（否则点开是空的）',
+      mainReg?.opts?.key === sideReg?.opts?.id, `${mainReg?.opts?.key} vs ${sideReg?.opts?.id}`);
+    ok('侧栏条目的 id 不是随便起的（等于面板 key）',
+      sideReg?.opts?.id === 'novel2card', String(sideReg?.opts?.id));
+    ok('侧栏条目带 label（DSH 从 list metadata 取显示文案）',
+      typeof sideReg?.opts?.label === 'function' || typeof sideReg?.opts?.label === 'string',
+      JSON.stringify(sideReg?.opts?.label));
+    ok('两个注册都是组件（函数）',
+      typeof mainReg?.comp === 'function' && typeof sideReg?.comp === 'function');
+
+    // 两条都渲染一遍，确认都产出真实的 React 元素树
     created.length = 0;
-    try { slotRegs[0].comp(); } catch (e) { /* 记录 */ }
-    ok('侧栏组件能调用且产出元素', created.length > 0, `${created.length} 个元素`);
+    try { mainReg.comp(); } catch (e) { /* 记录 */ }
+    ok('main 面板组件能调用且产出元素', created.length > 0, `${created.length} 个元素`);
+    created.length = 0;
+    try { sideReg.comp({ size: 20, active: true }); } catch (e) { /* 记录 */ }
+    ok('侧栏图标组件能调用且产出元素', created.length > 0, `${created.length} 个元素`);
+    ok('侧栏图标接受 ownerProps 的 size/active 不报错',
+      typeof sideReg.comp({ size: 24, active: false }) === 'object', '');
+
+    // 不再使用不存在的 layout 技巧
+    ok('没有调用不存在的 track.open / track.register',
+      !/track\.(open|register)/.test(src), '');
+    ok('openRightbar 若被使用则传布尔（真实签名是 boolean）',
+      !/openRightbar\(/.test(src) || /openRightbar\((true|false)/.test(src), '');
 
     // 样式必须只用主题 token
     ok('样式只用 --dsw-* 主题 token（不用写死的背景色）',
@@ -248,6 +279,8 @@ console.log('\n【4】客户端 bundle 在模拟宿主里实际执行');
       JSON.stringify((src.match(/className:\s*'([^']+)'/g) || []).slice(0, 5)));
     ok('没有写 document.body（文档明令禁止）', !/document\.body/.test(src), '');
     ok('没有用 iframe 承载宿主页面', !/<iframe/i.test(src), '');
+    ok('inject 只声明 slots（layout 不放进 inject，否则无 layout 的组合里整个条目不激活）',
+      mod.inject.length === 1 && mod.inject[0] === 'slots', JSON.stringify(mod.inject));
   }
 }
 

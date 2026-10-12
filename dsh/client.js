@@ -42,6 +42,8 @@ window.__ModuleLoader__.load({
 .n2c-card{border:1px solid var(--dsw-alias-border,rgba(255,255,255,.14));border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px}
 .n2c-file{display:flex;justify-content:space-between;gap:8px;font-size:12px}
 .n2c-pill{font-size:11px;padding:1px 7px;border-radius:99px;background:var(--dsw-alias-bg-button,rgba(255,255,255,.1))}
+.n2c-panel-icon{display:inline-flex;align-items:center;justify-content:center;line-height:1;border-radius:6px;opacity:.72}
+.n2c-panel-icon[data-active="1"]{opacity:1;background:var(--dsw-alias-bg-button,rgba(255,255,255,.12))}
 `;
 
     function useStyles() {
@@ -324,55 +326,74 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // 兼容导出：SidebarButton 与 Panel 都能用
+    /**
+     * 只声明 `slots`。
+     *
+     * `layout`（`ctx.layout.selectPanel` 等）**不放进 inject** —— 那样在没有 layout
+     * 服务的组合里整个条目都不会激活，侧栏图标也不会出现。真正必需的是 slots。
+     * 需要 layout 时用 `ctx.layout` 直接读，并用 try/catch 兜住。
+     */
     return {
-      inject: ['slots', 'layout'],
+      inject: ['slots'],
       apply(ctx) {
         /**
-         * 侧栏面板列表里放一个入口。
+         * 面板 key。
          *
-         * 选 `sidebar.panellist` 的理由：它是**已分配空间**的列表项 slot，
-         * 不需要自己算位置；点击后再用 layout 打开右侧栏面板。
-         * 这里刻意用 try/catch 包住 —— 槽位名或 layout API 在不同 DSH 版本上可能不同，
-         * 抛错会让整个 slot 条目崩掉（控制台会报 `slot entry crashed`）。
+         * ⚠️ 这个字符串**必须同时**用于 `main` 槽位的 key 与 `sidebar.panellist`
+         * 条目的 id —— DSH 的机制就是这样把两者对起来的：
+         *   main（keyed）：「Central panel selected by sidebar entry id」
+         *   sidebar.panellist（list）：「Each list id addresses the matching main panel;
+         *                              the sidebar owns the button」
          */
-        const layout = ctx.get ? ctx.get('layout') : null;
+        const PANEL_KEY = 'novel2card';
 
-        function SidebarEntry() {
+        /**
+         * 侧栏图标。
+         *
+         * ownerProps 提供 `{ size, active }` —— 只需画一个方形图标，
+         * 按钮本体（点击、选中态、tooltip）由 sidebar 自己渲染。
+         */
+        function SidebarIcon(props) {
           useStyles();
-          return h('div', {
-            className: 'n2c-tab',
-            role: 'button',
-            title: '小说 / 图片一键生成角色卡',
-            style: { cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 },
-            onClick: () => {
-              try {
-                if (layout && typeof layout.openRightbar === 'function') {
-                  layout.openRightbar(openPanel, false);
-                } else {
-                  // 没有 layout API 时退化成浮层 alert 式提示，不让点击变成静默失败
-                  console.warn('[novel2card] layout.openRightbar 不可用，无法打开面板');
-                }
-              } catch (e) { console.warn('[novel2card] 打开面板失败', e); }
-            },
-          }, h('span', null, '🃏'), h('span', null, '角色卡生成'));
+          const size = (props && props.size) || 20;
+          const active = !!(props && props.active);
+          return h('span', {
+            className: 'n2c-panel-icon',
+            'data-active': active ? '1' : '0',
+            style: { width: size + 'px', height: size + 'px', fontSize: Math.round(size * 0.85) + 'px' },
+            'aria-hidden': true,
+          }, '🃏');
         }
 
-        /** 右侧栏面板内容：用 track 注册，DSH 负责容器与标题栏 */
-        function openPanel(track) {
-          try {
-            if (track && typeof track.open === 'function') track.open({ title: '小说 / 图片 → 角色卡' });
-            if (track && typeof track.register === 'function') {
-              return track.register(Panel);
-            }
-          } catch (e) { console.warn('[novel2card] 注册面板失败', e); }
-          return null;
-        }
-
-        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
-          { name: 'sidebar.panellist', id: 'novel2card-entry', order: 20 },
-          SidebarEntry,
+        // ① 中央面板（main 是 keyed 槽位，key 必须与侧栏条目的 id 一致）
+        ctx.slots.inject('main', () => ctx.slots.register(
+          { name: 'main', key: PANEL_KEY },
+          Panel,
         ));
+
+        // ② 侧栏图标（id = 上面那个 key，点了由 sidebar 切到对应面板）
+        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
+          {
+            name: 'sidebar.panellist',
+            id: PANEL_KEY,
+            order: 20,
+            // label 用 thunk：每次投影都重读，便于以后接 locale
+            label: () => '角色卡生成',
+          },
+          SidebarIcon,
+        ));
+
+        /**
+         * 兜底：如果这个版本的 sidebar 不认 id → main key 的对应关系，
+         * 至少让 `ctx.layout.selectPanel()` 可用（用户可以从命令或后续 UI 调用）。
+         * 这里不做多余的自动切换，避免和 sidebar 自己的行为打架。
+         */
+        try {
+          if (ctx.layout && typeof ctx.layout.selectPanel !== 'function') {
+            console.warn('[novel2card] ctx.layout.selectPanel 不可用；面板已注册到 main，'
+              + '但侧栏按钮可能无法切换过去');
+          }
+        } catch { /* 忽略 */ }
       },
     };
   },
