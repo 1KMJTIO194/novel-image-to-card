@@ -998,6 +998,12 @@ git status --porcelain          # 看有没有 output/ uploads/ _tmp-* 之类的
 git ls-files | Select-String "output|uploads|_tmp-"   # 应为空
 ```
 
+> **历史小提示**：`feat(dsh): 增加 DeepSeek Harness 插件` 这一步是通过
+> GitHub Git Data API 推的（当时 `github.com:443` 不可达而 `api.github.com` 通），
+> 所以它的 commit SHA（`64d7fb9`）与本地 `git commit` 得到的不同。
+> **内容完全相同** —— 两侧 tree SHA 都是 `4ddb3d2d…`。
+> 下次网络正常时 `git push` 把本地那条推上去，历史自然对齐。
+
 ---
 
 ## 说明
