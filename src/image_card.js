@@ -155,6 +155,26 @@ export function normalizeCharacterProfiles(raw, { imageCount = 0, imageOffset = 
       : localIdx;    out.push({
       name: name || `角色${out.length + 1}`,
       imageIndex: mappedIdx,
+      /**
+       * 这个人出现在哪几段切片里（模型自报）。
+       *
+       * 切片场景下这是"是不是同一个人"的**主要线索** ——
+       * 「同一张图的好几段里都有这个角色」和「同一张图里有两个不同的人」
+       * 靠它区分。没切片时为空数组。
+       */
+      sliceIndexes: Array.isArray(c.sliceIndexes)
+        ? c.sliceIndexes.map(Number).filter(n => Number.isInteger(n) && n >= 0)
+        : [],
+      /**
+       * 截图里逐段转录的文字。
+       *
+       * 聊天记录 / 帖文类截图里，**文字往往比头像更有信息量** ——
+       * 姓名、身份、关系、发生了什么都在文字里。之前完全没要这个字段，
+       * 所以模型只能围着"头像直径只有 60 像素"打转。
+       */
+      transcript: String(c.transcript ?? '').trim(),
+      /** 文字里出现过的称呼/账号名，比自起的名字更有辨识度 */
+      namesFromText: Array.isArray(c.namesFromText) ? c.namesFromText.map(String).filter(Boolean) : [],
       aliases: Array.isArray(c.aliases) ? c.aliases.map(String).filter(Boolean) : [],
       gender: String(c.gender ?? '').trim(),
       ageRange: String(c.ageRange ?? '').trim(),
@@ -224,6 +244,94 @@ export function normalizeCharacterProfiles(raw, { imageCount = 0, imageOffset = 
   }
   return out;
 }
+
+/**
+ * 同一张原图内的档案合并。
+ *
+ * 为什么必须有这一步（实测踩坑）：
+ *   超长图被切成 6 段后，模型为**每一段**都输出了一条档案，名字分别是
+ *   「银发头像少女 uyu」「…（图1）」「…（图1）·」…（去重逻辑加的点）。
+ *   于是**一个人变成了 6 个角色**，每个都在变量树里占一个键，
+ *   卡里多出 5 条纯重复的条目。
+ *   我在 prompt 里要求"同一个人只输出一条"，但**不能只靠 prompt** ——
+ *   模型不听时用户就会看到这种结果，而代码必须能兜住。
+ *
+ * 合并判据是**名字归一化后相同**（去掉「（图N）」/·后缀、空白、大小写）：
+ *   · 归一化后同名 → 认为是同一个人的多段 → 合并
+ *   · 名字不同 → **保持分开**（可能是同一张图里的两个人，代码不该硬猜）
+ *
+ * 这一点是刻意保守的：**错误合并会丢角色**（把两个不同的人并成一个，
+ * 用户很难发现），而漏合并只是多一条重复条目（用户一眼能看出并手动删）。
+ *
+ * @param {Array<Array>} groups 按原图下标分组的档案
+ * @returns {Array} 合并后的扁平档案列表
+ */
+export function mergeSameImageProfiles(groups = []) {
+  const out = [];
+  // groups 本身可能不是数组（调用方传 null / 单个对象）—— 不能让边界输入炸掉整轮抽取
+  for (const group of (Array.isArray(groups) ? groups : [])) {
+    if (!Array.isArray(group) || !group.length) continue;
+    const merged = new Map();
+    for (const p of group) {
+      if (!p || typeof p !== 'object') continue;
+      const key = normalizeProfileName(p.name);
+      if (!key) { out.push(p); continue; }
+      const prev = merged.get(key);
+      if (!prev) { merged.set(key, { ...p }); continue; }
+      merged.set(key, combineProfiles(prev, p));
+    }
+    out.push(...merged.values());
+  }
+  return out;
+}
+
+/** 归一化名字：去掉去重后缀与空白，用于判定"是不是同一个名字" */
+export function normalizeProfileName(name) {
+  return String(name || '')
+    .replace(/[（(]\s*图\s*\d+\s*[)）]/g, '')   // 去掉「（图3）」
+    .replace(/[·・.\s]+$/g, '')                  // 去掉尾部去重用的点/空格
+    .replace(/\s+/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+/**
+ * 合并同一个人的两份档案：字段取"更长的那个"，数组取并集。
+ *
+ * 取更长而不是拼接：两段里的描述是**同一件事的重复叙述**（同一个人同一套衣服），
+ * 拼起来会变成"长发…长发…"的复读。取信息量更大的那份更合适。
+ */
+function combineProfiles(a, b) {
+  const longer = (x, y) => (String(y || '').length > String(x || '').length ? y : x);
+  const union = (x, y) => [...new Set([...(x || []), ...(y || [])])];
+  return {
+    ...a,
+    name: String(a.name).length >= String(b.name).length ? a.name : b.name,
+    sliceIndexes: union(a.sliceIndexes, b.sliceIndexes).sort((x, y) => x - y),
+    transcript: longer(a.transcript, b.transcript),
+    namesFromText: union(a.namesFromText, b.namesFromText),
+    aliases: union(a.aliases, b.aliases),
+    gender: a.gender || b.gender,
+    ageRange: longer(a.ageRange, b.ageRange),
+    // 置信度取更高的（同一人多份档案里，只要有一份看得清就算看得清）
+    confidence: rankConfidence(a.confidence) >= rankConfidence(b.confidence) ? a.confidence : b.confidence,
+    appearance: longer(a.appearance, b.appearance),
+    clothing: longer(a.clothing, b.clothing),
+    build: longer(a.build, b.build),
+    accessories: union(a.accessories, b.accessories),
+    palette: union(a.palette, b.palette),
+    scene: longer(a.scene, b.scene),
+    worldHints: union(a.worldHints, b.worldHints),
+    personalityHints: union(a.personalityHints, b.personalityHints),
+    inferredIdentity: longer(a.inferredIdentity, b.inferredIdentity),
+    inferredAbilities: longer(a.inferredAbilities, b.inferredAbilities),
+    inferredRelations: longer(a.inferredRelations, b.inferredRelations),
+    notes: longer(a.notes, b.notes),
+  };
+}
+
+const CONF_RANK = { high: 3, medium: 2, low: 1 };
+const rankConfidence = (c) => CONF_RANK[c] || 0;
 
 /**
  * 判断视觉抽取结果是否**实质上不可用**。
@@ -383,11 +491,40 @@ async function extractOneBatch(llm, images, { hint, offset, batchNo, batchTotal,
   const profiles = normalizeCharacterProfiles(parsed, {
     imageCount: n, imageOffset: offset, imagePaths: sliceOf,
   });
+
+  /**
+   * 切片场景下，把**同一张原图**的档案按名字合并。
+   *
+   * prompt 里已经要求"同一个人只输出一条"，但实测模型会为每一段各出一条
+   * （名字只差一个「（图N）」），于是一个人变成 6 个角色。
+   * 这里按原图下标分组再合并，兜住这种情况。
+   *
+   * 只在真的发生切片时做 —— 没切片时一个文件就是一张图，
+   * 同一张图里的两个不同人物**不该**被合并。
+   */
+  let finalProfiles = profiles;
+  /** 合并提示（有重复被合并时才有），由调用方写进进度日志 */
+  let dedupNote = null;
+  if (Array.isArray(sliceOf) && sliceOf.length) {
+    const byImage = new Map();
+    for (const p of profiles) {
+      const k = p.imageIndex;
+      if (!byImage.has(k)) byImage.set(k, []);
+      byImage.get(k).push(p);
+    }
+    const before = profiles.length;
+    finalProfiles = mergeSameImageProfiles([...byImage.values()]);
+    if (finalProfiles.length < before) {
+      // 合并掉了重复 —— 这是好事，但要说出来，否则用户不知道"9 条档案"为何变少
+      dedupNote = `同一张图的重复档案已合并：${before} → ${finalProfiles.length} 条`;
+    }
+  }
+
   // 模型自述是否看到图（prompt 要求它先回答这个）。缺字段时传 null，交给内容兜底判
   const sawImage = parsed && typeof parsed === 'object' && typeof parsed.sawImage === 'boolean'
     ? parsed.sawImage
     : null;
-  return { profiles, raw, parseError, sawImage, reason: parsed?.reason };
+  return { profiles: finalProfiles, raw, parseError, sawImage, reason: parsed?.reason, dedupNote };
 }
 
 /**
@@ -520,6 +657,10 @@ export async function extractCharactersFromImages(cfg = {}) {
             : `视觉抽取：${got} 条人物档案`,
           ts: Date.now(),
         });
+        // 合并掉重复时说一声，否则用户不知道档案数为何比图段数少
+        if (results[i].dedupNote) {
+          send('progress', { step: 'Vision', msg: `  · ${results[i].dedupNote}`, ts: Date.now() });
+        }
       } catch (e) {
         /**
          * 批次级再试一次。
@@ -734,6 +875,10 @@ export function shortPlaceName(scene) {
  * 图片来源的世界观只能从**画面线索**推，可靠性远低于小说路径，
  * 所以这里：① 条目少而保守；② 每条都标明依据；③ 只做 map_world 一条 +
  * 明确出现的场景做 map_location，不硬凑体系和势力。
+ *
+ * 但**截图里的文字是实打实的信息**（帖文、聊天记录、旁白），
+ * 所以额外单独出一条 `transcript` —— 它常常是整张卡里信息密度最高的部分：
+ * 姓名、身份、关系、发生了什么都在里面。之前这些内容被完全丢掉了。
  */
 export function renderWorldbookFromProfiles(profiles = [], { title = '' } = {}) {
   const items = [];
@@ -748,6 +893,23 @@ export function renderWorldbookFromProfiles(profiles = [], { title = '' } = {}) 
   }
   const hints = [...new Set(profiles.flatMap(p => p.worldHints || []))];
   const paletteNote = [...new Set(profiles.flatMap(p => p.palette || []))];
+
+  /**
+   * 汇总截图文字。
+   *
+   * 去重的判据是"归一化后相同"：同一张长截图的不同段常被模型转录出
+   * 高度重叠的文本，直接拼起来会变成一份复读的文档。
+   */
+  const seenTranscript = new Set();
+  const transcriptParts = [];
+  for (const p of profiles) {
+    const t = String(p.transcript || '').trim();
+    if (!t || t === '画面无文字') continue;
+    const key = t.replace(/\s+/g, '').slice(0, 120);
+    if (seenTranscript.has(key)) continue;
+    seenTranscript.add(key);
+    transcriptParts.push(t);
+  }
 
   const worldBody = [
     `本条目由**图片**推断，不是从文字设定读取的，可靠性低于小说路径。`,
@@ -773,6 +935,23 @@ export function renderWorldbookFromProfiles(profiles = [], { title = '' } = {}) 
       content: `${full}\n\n依据：图片视觉线索（非文字设定）。\n具体位置、归属势力与历史需用户补充。`,
     });
   }
+
+  // 截图文字单独成条：这是唯一"来自文字而非推断"的内容，价值最高
+  if (transcriptParts.length) {
+    const body = [
+      '以下文字**转录自图片画面**（帖文 / 聊天记录 / 旁白等），属于可靠信息，',
+      '不是推断。涉及的人名、称呼、身份、关系、事件都应以此为准。',
+      '',
+      ...transcriptParts.map((t, i) => `【第 ${i + 1} 段】\n${t}`),
+    ].join('\n');
+    items.push({
+      category: 'system_item',
+      name: '图中文字（转录）',
+      keys: ['帖文', '聊天记录', '对话', '原文'],
+      content: body,
+    });
+  }
+
   return items;
 }
 
@@ -900,9 +1079,25 @@ export async function buildCardFromExtraction(cfg = {}) {
   ])].slice(0, 6);
   const cardFields = {
     name: title,
-    description: profiles.map(p => `${p.name}：${(p.appearance || '外貌详见人物档案').slice(0, 60)}`).join('\n'),
-    personality: profiles.map(p => p.personalityHints?.join('、')).filter(Boolean).join('；') || '待补充',
-    scenario: profiles.map(p => p.scene).filter(Boolean).join('；') || '由图片生成，场景与剧情待用户补充',
+    /**
+     * description：把每个人的**可用信息**写在一起。
+     *
+     * 踩过的坑：原来是 `外貌.slice(0,60)`，于是 description 成了
+     * 「图片未提供；该角色在 6 张截图里没有以任何形式出现：没有头像…」——
+     * 全是"看不见什么"，用户看了不知道这张卡里到底有谁。
+     * 现在按"身份 → 外貌 → 关系"取信息量最大的那个，并且**优先用文字里的信息**。
+     */
+    description: profiles.map(buildProfileSummary).filter(Boolean).join('\n') || '待补充',
+    personality: profiles
+      .map(p => {
+        const hints = (p.personalityHints || []).join('、');
+        return hints ? `${p.name}：${hints}` : '';
+      }).filter(Boolean).join('\n') || '待补充',
+    /**
+     * scenario：优先用**文字里明确说的情境**（帖文/聊天记录里的地点与关系），
+     * 其次是画面场景描述。都不行才留待补充。
+     */
+    scenario: buildScenario(profiles) || '由图片生成，场景与剧情待用户补充',
     first_mes: buildFirstMes(characters, profiles),
     tags,
   };
@@ -932,6 +1127,71 @@ export async function buildCardFromExtraction(cfg = {}) {
 }
 
 /**
+ * 一条人物档案的**可用摘要**（给 description 用）。
+ *
+ * 顺序刻意是"身份 → 关系 → 外貌"：用户看卡时最想知道的是**这人是谁**，
+ * 外貌反而是细节。而身份/关系常常来自截图文字（如果有），比画面推断可靠。
+ * 全都拿不到时才如实说明"图片未提供"，但不会拿这句话当摘要主体。
+ */
+function buildProfileSummary(p) {
+  const pick = (s) => String(s || '').trim();
+  const firstSentence = (s, max = 90) => {
+    const t = pick(s).replace(/\s+/g, ' ');
+    if (!t) return '';
+    const cut = t.split(/[。；;\n]/).find(x => x.trim().length > 3) || t;
+    return cut.length > max ? cut.slice(0, max) + '…' : cut;
+  };
+  // 「图片未提供」这类否定句不算信息
+  const useful = (s) => {
+    const t = pick(s);
+    return t && !/^(图片未提供|未提供|图片未给出|无法辨认|不可辨|未见)/.test(t);
+  };
+
+  const parts = [];
+  const identity = useful(p.inferredIdentity) ? firstSentence(p.inferredIdentity, 70) : '';
+  const relation = useful(p.inferredRelations) ? firstSentence(p.inferredRelations, 70) : '';
+  const appear = useful(p.appearance) ? firstSentence(p.appearance, 90) : '';
+  const names = (p.namesFromText || []).filter(Boolean);
+
+  if (identity) parts.push(identity);
+  if (relation && relation !== identity) parts.push(relation);
+  if (appear) parts.push(appear);
+
+  const head = `【${p.name}】`
+    + (names.length ? `（文字中的称呼：${names.slice(0, 3).join('、')}）` : '');
+  if (!parts.length) {
+    return `${head}\n  画面与文字都没有提供可用的人物信息（需要你自己补设定）。`;
+  }
+  return `${head}\n  ${parts.join(' ｜ ')}`;
+}
+
+/**
+ * 场景 / 情境。
+ *
+ * 优先文字：截图里往往直接写着地点与关系（"住同一寝室""导员""开学不久"），
+ * 这比"画面是深色模式的手机界面"有用得多 —— 后者描述的是**截图本身**，
+ * 不是故事的场景。踩过的坑：scenario 原来就是一堆"这是一张手机截图"。
+ */
+function buildScenario(profiles = []) {
+  const scenes = [...new Set(profiles.map(p => String(p.scene || '').trim()).filter(Boolean))];
+  const relations = [...new Set(profiles
+    .map(p => String(p.inferredRelations || '').trim())
+    .filter(s => s && !/未提供|无法|不可辨/.test(s)))];
+  const identities = [...new Set(profiles
+    .map(p => String(p.inferredIdentity || '').trim())
+    .filter(s => s && !/未提供|无法|不可辨/.test(s)))];
+
+  const lines = [];
+  if (relations.length) lines.push(`人物关系：${relations.slice(0, 4).join('；')}`);
+  if (identities.length) lines.push(`身份线索：${identities.slice(0, 4).join('；')}`);
+  if (scenes.length) lines.push(`画面场景：${scenes.slice(0, 3).join('；')}`);
+  if (!lines.length) return '';
+  // 提醒这是图片路径的固有限制，用户知道该补什么
+  lines.push('（图片路径没有剧情文本，具体时间线与事件需要你补充。）');
+  return lines.join('\n');
+}
+
+/**
  * 开场白：图片路径没有剧情可讲，所以开场白**引导用户自己开场**，
  * 而不是编一段假剧情（那会让用户以为卡里有剧情）。
  */
@@ -941,7 +1201,9 @@ function buildFirstMes(characters = [], profiles = []) {
   const lines = [];
   lines.push('<!-- 本卡由图片生成：外貌与服饰来自图片，剧情与关系需要你补充 -->');
   lines.push('');
-  lines.push(scene ? `场景：${scene}` : '场景：（请补充）');
+  // 文字里明确提到的情境比画面描述更接近"故事场景"，优先给用户看
+  const scenario = buildScenario(profiles);
+  lines.push(scenario ? scenario.split('\n')[0] : (scene ? `场景：${scene}` : '场景：（请补充）'));
   lines.push('');
   lines.push(`在场角色：${names.join('、') || '（未识别出角色）'}`);
   lines.push('');
