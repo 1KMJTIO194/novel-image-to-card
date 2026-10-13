@@ -19,7 +19,7 @@
  *
  * 后者可以用注入的抽取结果完整验证（见 tests/image-card.mjs）。
  */
-import { readFile, writeFile, mkdir, copyFile, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 import { makeLLM, inferImageMime } from './llm.js';
@@ -28,6 +28,7 @@ import { varKey } from './utils.js';
 import { parseDateParts } from './dates.js';
 import { generateStatusbar, THEMES } from './step75_statusbar.js';
 import { summarizeGenerate, renderSummaryMarkdown } from './summary.js';
+import { sliceAllForVision } from './image_slice.js';
 import {
   assembleCharacterCard, assembleWorldbook, buildVariables, initializeUserNamespace,
   inspectContentYaml, isPlaceholderBody, makeStatusbarPreview,
@@ -123,17 +124,21 @@ export async function loadImageInfo(p) {
  * 归一化视觉模型返回的人物档案。
  *
  * @param {*} raw 模型返回（对象 / 数组 / {characters:[...]}）
- * @param {{imageCount?:number, imageOffset?:number}} [opts]
+ * @param {{imageCount?:number, imageOffset?:number, imagePaths?:Array<number>}} [opts]
  *        imageCount —— **本批**的图片数（用于把越界的 imageIndex 夹回本批范围）
- *        imageOffset —— 本批第一张图在**全部图片**里的下标。
- *                       分批送模型时，每批都是"从 0 开始"的局部编号，
- *                       加上 offset 才能保证「（图N）」说的是全局第 N 张。
+ *        imageOffset —— 本批第一张图在**全部图片**里的下标（无切片时用）。
+ *        imagePaths —— **批内文件下标 → 全局原图下标**的映射表（切片后用）。
+ *                       超长图切片后一个原图对应多个文件，模型按文件顺序报
+ *                       imageIndex，必须查这张表映射回原图下标，
+ *                       否则「（图5）」会指向一张不存在的图。
+ *                       ⚠️ 它**已经包含** offset 的语义，两者不要叠加。
  */
-export function normalizeCharacterProfiles(raw, { imageCount = 0, imageOffset = 0 } = {}) {
+export function normalizeCharacterProfiles(raw, { imageCount = 0, imageOffset = 0, imagePaths = null } = {}) {
   const list = Array.isArray(raw) ? raw
     : Array.isArray(raw?.characters) ? raw.characters
       : Array.isArray(raw?.profiles) ? raw.profiles
         : raw && typeof raw === 'object' ? [raw] : [];
+  const hasMap = Array.isArray(imagePaths) && imagePaths.length > 0;
   const out = [];
   for (const [i, c] of list.entries()) {
     if (!c || typeof c !== 'object') continue;
@@ -144,9 +149,12 @@ export function normalizeCharacterProfiles(raw, { imageCount = 0, imageOffset = 
     if (!name && !appearance && !clothing) continue;
     // 本批内的局部下标：模型说 imageIndex 就用它，否则按输出顺序
     const localIdx = Number.isInteger(c.imageIndex) ? c.imageIndex : i;
-    out.push({
+    /** 局部下标 → 全局原图下标：有映射表就查表，否则退回 offset 平移 */
+    const mappedIdx = hasMap
+      ? (imagePaths[Math.max(0, Math.min(localIdx, imagePaths.length - 1))] ?? localIdx)
+      : localIdx;    out.push({
       name: name || `角色${out.length + 1}`,
-      imageIndex: localIdx,
+      imageIndex: mappedIdx,
       aliases: Array.isArray(c.aliases) ? c.aliases.map(String).filter(Boolean) : [],
       gender: String(c.gender ?? '').trim(),
       ageRange: String(c.ageRange ?? '').trim(),
@@ -170,15 +178,19 @@ export function normalizeCharacterProfiles(raw, { imageCount = 0, imageOffset = 
    *
    * ⚠️ 顺序很重要：先按本批夹取、再加 offset。
    * 反过来的话（先加 offset 再按本批 imageCount 夹）会把后面的批次全夹回 0。
+   *
+   * ⚠️ 有映射表（切片场景）时**不能**再叠加 offset：
+   * `imagePaths` 里存的已经是**全局原图下标**（切片时由 sliceAllForVision 算好），
+   * 再加一次 offset 会双重平移，把「（图N）」指到不存在的图上。
    */
-  if (imageCount > 0) {
+  if (imageCount > 0 && !hasMap) {
     for (const c of out) {
       if (!Number.isInteger(c.imageIndex) || c.imageIndex < 0 || c.imageIndex >= imageCount) {
         c.imageIndex = Math.min(Math.max(0, c.imageIndex || 0), imageCount - 1);
       }
     }
   }
-  if (imageOffset) {
+  if (imageOffset && !hasMap) {
     for (const c of out) c.imageIndex += imageOffset;
   }
 
@@ -329,11 +341,22 @@ export function mergeBatchProfiles(batchProfiles = []) {
 /**
  * 单批图片的视觉抽取（内部用）。返回该批的档案（imageIndex 为本批局部下标）。
  */
-async function extractOneBatch(llm, images, { hint, offset, batchNo, batchTotal }) {
+async function extractOneBatch(llm, images, { hint, offset, batchNo, batchTotal, sliceOf = null }) {
   const n = images.length;
+  /**
+   * 超长图被切片时，模型看到的是"同一张图的好几段" —— 必须明确告诉它，
+   * 否则它会为每段输出一个"新角色"，同一个人被登记好几遍。
+   */
+  const slicedNote = sliceOf?.some(x => x !== null)
+    ? `\n【注意】其中有图片是从**同一张超长截图**按上到下切出来的多段`
+      + `（以下标明的段号属于同一张图）。同一张图的多段请**合并成一个角色**，`
+      + `不要因为分段就重复登记同一个人。\n`
+      + sliceOf.map((orig, i) => (orig === null ? '' : `第 ${i + 1} 个文件 = 原图${orig + 1}的一段`)).filter(Boolean).join('\n')
+    : '';
   const userText = [
     `以下是 ${n} 张图片，请为**每一张**图片中的人物各输出一条档案。`,
     batchTotal > 1 ? `（这是第 ${batchNo}/${batchTotal} 批，共 ${n} 张）` : '',
+    slicedNote,
     hint ? `\n【用户补充的设定（优先采纳，与图片冲突时以用户设定为准）】\n${hint}` : '',
     `\n按图片顺序输出，共 ${n} 条。`,
   ].filter(Boolean).join('\n');
@@ -350,13 +373,16 @@ async function extractOneBatch(llm, images, { hint, offset, batchNo, batchTotal 
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    // 模型有时会在 JSON 外面包一层说明文字，抠出花括号再试一次
+    // 模型有时会在 JSON 外面包一层花括号说明文字，抠出花括号再试一次
     const m = /\{[\s\S]*\}|\[[\s\S]*\]/.exec(String(raw));
     if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parseError = e2.message; } }
     else parseError = e.message;
   }
   // offset 让「（图N）」说的是**全局**第 N 张，而不是"本批第 N 张"
-  const profiles = normalizeCharacterProfiles(parsed, { imageCount: n, imageOffset: offset });
+  // imagePaths 让切片段的局部下标映射回**原图**下标
+  const profiles = normalizeCharacterProfiles(parsed, {
+    imageCount: n, imageOffset: offset, imagePaths: sliceOf,
+  });
   // 模型自述是否看到图（prompt 要求它先回答这个）。缺字段时传 null，交给内容兜底判
   const sawImage = parsed && typeof parsed === 'object' && typeof parsed.sawImage === 'boolean'
     ? parsed.sawImage
@@ -407,18 +433,61 @@ export async function extractCharactersFromImages(cfg = {}) {
   const images = valid.images;
   const total = images.length;
 
-  // 切批
+  /**
+   * 超长截图切片。
+   *
+   * 为什么要做（实测）：一张 720x6269 的手机长截图（宽高比 1:8.7）原样发给
+   * 视觉模型时，**只读到了帖子的小头像，正文一个字没读到** —— 整图被按比例
+   * 缩到模型的视觉尺寸上限，字号被压到无法辨认。
+   *
+   * 切完再送，模型看到的是"几张正常比例的图"，文字可读。
+   * 代价是 token 变多（片间还有重叠），所以默认只在确实过长时才切。
+   */
+  let visionFiles = images.map(i => i.path);
+  /** 批内文件下标 → 全局原图下标；仅在发生切片时非空 */
+  let visionMap = null;
+  const sliceDir = path.join(cfg.workDir || path.dirname(images[0].path), '_slices');
+  if (cfg.sliceTallImages !== false) {
+    try {
+      const sl = await sliceAllForVision(images, sliceDir);
+      if (sl.slicedCount > 0) {
+        visionFiles = sl.files;
+        visionMap = sl.mapping;
+        send('progress', {
+          step: 'Vision',
+          msg: `超长图已切片：${sl.slicedCount} 张 → ${sl.files.length} 个片段（保持可读分辨率，否则长截图里的文字读不到）`,
+          ts: Date.now(),
+        });
+        for (const n of sl.notes) send('progress', { step: 'Vision', msg: `  · ${n}`, ts: Date.now() });
+      } else if (sl.notes.length) {
+        for (const n of sl.notes) send('progress', { step: 'WARN', msg: n, ts: Date.now() });
+      }
+    } catch (e) {
+      // 切片只是优化，不能因为它把整个任务搞挂
+      send('progress', { step: 'WARN', msg: `长图切片失败，改用原图：${e.message}`, ts: Date.now() });
+    }
+  }
+
+  // 切批：按**发送给模型的文件**切（切片会改变数量）
+  const totalFiles = visionFiles.length;
   const batches = [];
-  for (let i = 0; i < total; i += batchSize) {
-    batches.push({ offset: i, images: images.slice(i, i + batchSize) });
+  for (let i = 0; i < totalFiles; i += batchSize) {
+    const files = visionFiles.slice(i, i + batchSize);
+    batches.push({
+      offset: i,
+      images: files.map(p => ({ path: p })),
+      /** 本批每个文件对应的**原图**下标；无切片时为 null（走 offset 平移） */
+      sliceOf: visionMap ? visionMap.slice(i, i + batchSize) : null,
+    });
   }
 
   send('progress', {
     step: 'Vision',
     msg: batches.length > 1
-      ? `视觉抽取：${total} 张图，分 ${batches.length} 批（每批最多 ${batchSize} 张）`
-        + `${hint ? ' + 用户文字设定' : ''}`
-      : `视觉抽取：${total} 张图${hint ? ' + 用户文字设定' : ''}`,
+      ? `视觉抽取：${total} 张图${totalFiles !== total ? `（切片后 ${totalFiles} 个片段）` : ''}，`
+        + `分 ${batches.length} 批（每批最多 ${batchSize} 张）${hint ? ' + 用户文字设定' : ''}`
+      : `视觉抽取：${total} 张图${totalFiles !== total ? `（切片后 ${totalFiles} 个片段）` : ''}`
+        + `${hint ? ' + 用户文字设定' : ''}`,
     ts: Date.now(),
   });
 
@@ -441,7 +510,7 @@ export async function extractCharactersFromImages(cfg = {}) {
       const b = batches[i];
       try {
         results[i] = await extractOneBatch(llm, b.images, {
-          hint, offset: b.offset, batchNo: i + 1, batchTotal: batches.length,
+          hint, offset: b.offset, batchNo: i + 1, batchTotal: batches.length, sliceOf: b.sliceOf,
         });
         const got = results[i].profiles.length;
         send('progress', {
@@ -465,7 +534,7 @@ export async function extractCharactersFromImages(cfg = {}) {
           await new Promise(r => setTimeout(r, 1500 * attempt));
           try {
             results[i] = await extractOneBatch(llm, b.images, {
-              hint, offset: b.offset, batchNo: i + 1, batchTotal: batches.length,
+              hint, offset: b.offset, batchNo: i + 1, batchTotal: batches.length, sliceOf: b.sliceOf,
             });
             lastErr = null;
             send('progress', {
@@ -555,10 +624,17 @@ export async function extractCharactersFromImages(cfg = {}) {
         : `视觉抽取结果不可用：${quality.detail}`,
     ts: Date.now(),
   });
+  // 切片是中间产物，任务结束就清掉 —— 否则每次生成都在产物目录里堆一堆图
+  if (visionMap) {
+    await rm(sliceDir, { recursive: true, force: true }).catch(() => {});
+  }
+
   return {
     profiles, raw, usage: llm.usage, images: valid.images,
     parseError, quality, sawImage,
     batches: batches.length, failedBatches: failed, emptyBatches,
+    /** 切片信息（无切片时为 null），便于事后核对"长图有没有被切开" */
+    slicing: visionMap ? { original: total, files: totalFiles, slices: batches.length } : null,
   };
 }
 
