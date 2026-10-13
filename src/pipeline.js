@@ -1338,6 +1338,8 @@ export async function runPipeline(config, send) {
     worldbook.entries.filter(e => e.constant).map(e => e.content).join('')
   );
   const bTokens = estimateTokens(JSON.stringify(preset));
+  /** 整套常驻（A 包 + 卡内置模板）；只在组装了完整卡时有值 */
+  let tokensWhole = null;
 
   // ===== Step 8.5 组装完整角色卡（chara_card_v3）=====
   // 输出模式：
@@ -1370,6 +1372,30 @@ export async function runPipeline(config, send) {
     const cardBytes = Buffer.byteLength(JSON.stringify(characterCard, null, 2), 'utf8');
     log('Step 8.5', `角色卡：${cardEntries.length} 条世界书条目 / `
       + `${characterCard.data.extensions.regex_scripts.length} 条正则 / ${(cardBytes / 1024).toFixed(1)} KB`);
+
+    /**
+     * 卡装好之后**再算一次整套常驻预算**。
+     *
+     * `validate` 只看到 A 包世界书（这里 1478 tok，合格），而卡里还内置了
+     * 变量更新规则 / 导演指令 等固定常驻模板 —— 导入完整卡时两者同时生效。
+     * 实测合计 3055 tok（上限 2000），旧口径下这个超标是**静默**的。
+     * 所以这里补一条按"用户实际导入的东西"算的警告。
+     */
+    const builtinText = collectBuiltinConstantText(characterCard, worldbook);
+    const builtinTokens = estimateTokens(builtinText);
+    const aPackTokens = estimateTokens(
+      worldbook.entries.filter(e => e.constant).map(e => e.content).join(''),
+    );
+    const wholeBudget = limits.maxA + limits.maxB;
+    const wholeTokens = aPackTokens + builtinTokens;
+    if (wholeTokens > wholeBudget) {
+      warnings.push(
+        `整套常驻 ${wholeTokens} token 超过上限 ${wholeBudget}`
+        + `（A 包世界书 ${aPackTokens} + 卡内置模板 ${builtinTokens}）：`
+        + '导入「完整角色卡」时两部分同时生效，会挤压对话上下文',
+      );
+    }
+    tokensWhole = { aPack: aPackTokens, builtin: builtinTokens, total: wholeTokens, budget: wholeBudget };
   } else {
     log('Step 8.5', '按输出模式跳过完整角色卡');
   }
@@ -1404,7 +1430,19 @@ export async function runPipeline(config, send) {
       }, {}),
       mentions: mentions.reduce((s, m) => s + (m.mentions?.length || 0), 0),
     },
-    tokens: { a: aTokens, b: bTokens, limits },
+    tokens: {
+      a: aTokens,
+      b: bTokens,
+      limits,
+      /**
+       * 整套常驻（A 包世界书 + 卡内置固定模板）。
+       *
+       * 只导「完整角色卡」时两者同时生效，所以这才是用户实际感受到的固定开销。
+       * 旧版 meta 只有 a/b 两个数：a 只统计世界书，卡内置模板（变量更新规则、
+       * 导演指令…）**完全不在账上** —— 实测 3055 tok 而 a 报 1478，看不出超标。
+       */
+      whole: tokensWhole,
+    },
     /**
      * LLM 用量记账（按字符数，见 llm.js 的 usage）。
      *
@@ -1614,6 +1652,15 @@ export async function runPipeline(config, send) {
   }
 
   log('Done', `A 包常驻 ${aTokens} tok / B 包常驻 ${bTokens} tok，耗时 ${(meta.durationMs / 1000).toFixed(1)}s`);
+  // 只导完整卡时，卡内置模板与世界书一起生效 —— 报出用户的真实固定开销
+  if (tokensWhole) {
+    const over = tokensWhole.total > tokensWhole.budget;
+    log(over ? 'WARN' : 'Done',
+      `整套常驻 ${tokensWhole.total} tok（世界书 ${tokensWhole.aPack} + 卡内置模板 `
+      + `${tokensWhole.builtin}，上限 ${tokensWhole.budget}）`
+      + (over ? ' —— 超标，会挤压对话上下文' : ''));
+  }
+  for (const w of warnings) log('WARN', w);
 
   const fileList = Object.keys(files);
   if (hasAvatar) {
@@ -3252,7 +3299,35 @@ function validate(worldbook, preset, limits = DEFAULT_LIMITS, keyLimits = null) 
   if (!preset.b1_variables.includes('events:')) warnings.push('B1 缺少 events');
   if (!preset.b1_variables.includes('user:')) warnings.push('B1 缺少 user');
   if (!worldbook.entries.length) warnings.push('世界书为空');
+
+  /**
+   * 注：整套常驻预算（A 包 + 卡内置模板）**不在这里**算。
+   *
+   * 因为 `validate` 跑在卡组装**之前**，此时还不知道内置模板实际有多大。
+   * 算在这里只能靠猜，不如在 `assembleCharacterCard` 之后按真实产物算一次
+   *（见 Step 8.5 之后的 `collectBuiltinConstantText` 调用）。
+   */
   return warnings;
+}
+
+/**
+ * 把卡内置的固定常驻模板（不含世界书）拼成一段文本，供整套预算估算。
+ *
+ * 之所以要单独抽出来：这批模板是 `assembleCharacterCard` 里 push 进去的，
+ * 与 A 包世界书是两条路径，很容易在预算统计里被漏掉（实际就漏了）。
+ * 判定方式是「常驻 + 条目名不在世界书里」，这样新加模板也能自动计入。
+ *
+ * @param {object} card 组装好的 character_card.json
+ * @param {object} worldbook A 包世界书
+ */
+export function collectBuiltinConstantText(card, worldbook) {
+  const cardEntries = card?.data?.character_book?.entries;
+  if (!Array.isArray(cardEntries)) return '';
+  const wbNames = new Set((worldbook?.entries || []).map(e => String(e.comment || '')));
+  return cardEntries
+    .filter(e => e.constant && !wbNames.has(String(e.comment || '')))
+    .map(e => String(e.content || ''))
+    .join('');
 }
 
 // ============================================================
