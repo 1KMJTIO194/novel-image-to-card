@@ -433,7 +433,46 @@ export async function renderGenerate(mount, params) {
     strategyHint,
   );
 
-  augmentCards = [augmentCardCard, strategyCard];
+  /**
+   * 完善指令：用自然语言告诉这次要怎么完善。
+   *
+   * 指令会拼进**每个抽取步骤**的 prompt，并与「已有卡世界观摘要」一起生效 ——
+   * 也就是说"要符合角色卡世界观"这件事不需要用户在指令里反复强调，
+   * 抽取阶段已经默认按原卡口径走。
+   */
+  const instructionInput = el('textarea', {
+    id: 'f-instruction', name: 'instruction', rows: '4',
+    placeholder: '例如：只把小说里的角色并进已有卡，角色设定要符合原卡世界观；\n'
+      + '地图与势力也一并纳入，但沿用原卡已有的地名与势力名。',
+  });
+  const instructionCard = el('div', { class: 'card' },
+    el('div', { class: 'card-head' },
+      el('h3', { text: '完善指令（可选）' }),
+      el('span', { class: 'spacer' }),
+      el('span', { class: 'hint', text: '最多 2000 字' }),
+    ),
+    field({
+      label: '这次想怎么完善',
+      control: instructionInput,
+      id: 'f-instruction',
+      name: 'instruction',
+      hint: '用自然语言写你的要求，会作为高优先级规则加进每个抽取步骤。'
+        + '例如「只要角色，不要地图」「地图势力也要，但沿用原卡地名」。'
+        + '留空则只按「符合已有卡世界观」的通用要求抽取。',
+    }),
+    el('div', { class: 'row tight', style: { flexWrap: 'wrap', gap: '6px', marginTop: '6px' } },
+      ...[
+        '只合并角色，角色设定必须符合原卡世界观',
+        '把地图与势力也合并进去，沿用原卡已有的地名与势力名',
+        '角色与世界观都要，新角色不要引入原卡没有的体系',
+      ].map(t => el('button', {
+        class: 'btn sm ghost', type: 'button', text: t.slice(0, 14) + '…',
+        title: t,
+        onclick: () => { instructionInput.value = t; },
+      }))),
+  );
+
+  augmentCards = [augmentCardCard, strategyCard, instructionCard];
   paintStrategies();
 
   const fileCard = el('div', { class: 'card' },
@@ -1246,6 +1285,15 @@ export async function renderGenerate(mount, params) {
     // 章节范围：两个模式共用同一个值（都由共用的章节组件产出）
     fd.append('chapterRange', chapterSelector.getRange());
     if (augmenting) fd.append('strategy', strategy);
+    if (augmenting) {
+      // 完善指令：会拼进每个抽取步骤的 prompt（服务端限 2000 字）
+      const inst = instructionInput.value.trim();
+      if (inst.length > 2000) {
+        toast(`完善指令过长（${inst.length} 字，上限 2000 字）`, 'error');
+        return false;
+      }
+      if (inst) fd.append('instruction', inst);
+    }
     // 断点续跑：带上原任务 ID，服务端会（且只会）复用它 batches/ 下已完成的批次。
     // 不传时服务端照常新建任务目录，不会碰到任何旧批次。
     if (!augmenting && resumeTarget?.taskId) fd.append('resumeTaskId', resumeTarget.taskId);

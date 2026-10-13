@@ -60,6 +60,65 @@ window.__ModuleLoader__.load({
       h('span', { className: 'n2c-label' }, props.label),
       props.children);
 
+    /** 三种指令快捷按钮 */
+    const INSTRUCTION_PRESETS = [
+      '只合并角色，角色设定必须符合原卡世界观',
+      '把地图与势力也合并进去，沿用原卡已有的地名与势力名',
+      '角色与世界观都要，新角色不要引入原卡没有的体系',
+    ];
+
+    /**
+     * 「完善已有卡」的输入区。
+     *
+     * 抽成独立组件的原因很实际：这段嵌在三层三元里时括号极难数对
+     * （我在这里连续数错过两次，客户端的语法错会让整个 slot 崩掉）。
+     * 独立出来既好写也好读。
+     */
+    function AugmentFields(props) {
+      const { cardRef, text, setText, instruction, setInstruction, strategy, setStrategy } = props;
+
+      const cardField = h(Field, { label: '已有角色卡（character_card.json）' },
+        h('input', { className: 'n2c-input', type: 'file', accept: '.json', ref: cardRef }));
+
+      const novelField = h(Field, { label: '新剧情文本' },
+        h('textarea', {
+          className: 'n2c-textarea', value: text,
+          onChange: e => setText(e.target.value),
+          placeholder: '粘贴新增的章节内容…',
+        }));
+
+      // 完善指令：会拼进每个抽取步骤，并与「已有卡世界观摘要」一起生效
+      const instructionField = h(Field, { label: '完善指令（可选，最多 2000 字）' },
+        h('textarea', {
+          className: 'n2c-textarea', style: { minHeight: '76px' },
+          value: instruction, onChange: e => setInstruction(e.target.value),
+          placeholder: '例如：只把小说里的角色并进已有卡，角色设定要符合原卡世界观；'
+            + '地图与势力也纳入，但沿用原卡已有的地名与势力名。',
+        }));
+
+      const strategySelect = h('select', {
+        className: 'n2c-select', value: strategy, onChange: e => setStrategy(e.target.value),
+      },
+      h('option', { value: 'merge' }, 'merge（默认，追加进已有条目）'),
+      h('option', { value: 'append' }, 'append（只新增，不动已有）'),
+      h('option', { value: 'overwrite' }, 'overwrite（替换已有条目）'));
+
+      const presetButtons = INSTRUCTION_PRESETS.map(t => h('button', {
+        key: t, className: 'n2c-btn', type: 'button', title: t,
+        onClick: () => setInstruction(t),
+      }, t.slice(0, 14) + '…'));
+
+      return h('div', { className: 'n2c-col' },
+        cardField,
+        novelField,
+        instructionField,
+        h('div', { className: 'n2c-row' }, h(Field, { label: '合并策略' }, strategySelect)),
+        h('div', { className: 'n2c-hint' },
+          '指令会作为高优先级规则加进事件 / 世界观 / 人物 / 档案四个抽取步骤；'
+          + '已有卡的世界观摘要也会一并喂进去（所以"符合原卡世界观"是默认行为）。'),
+        h('div', { className: 'n2c-row', style: { flexWrap: 'wrap', gap: '6px' } }, presetButtons));
+    }
+
     // ---------- 主面板 ----------
     function Panel() {
       useStyles();
@@ -71,6 +130,8 @@ window.__ModuleLoader__.load({
       const [text, setText] = useState('');
       const [strategy, setStrategy] = useState('merge');
       const [chapterRange, setChapterRange] = useState('all');
+      /** 完善指令：会拼进每个抽取步骤的 prompt */
+      const [instruction, setInstruction] = useState('');
 
       const [running, setRunning] = useState(false);
       const [taskId, setTaskId] = useState(null);
@@ -177,6 +238,9 @@ window.__ModuleLoader__.load({
             fd.append('strategy', strategy);
             fd.append('novelText', text);
             fd.append('card', cardRef.current.files[0], cardRef.current.files[0].name);
+            // 完善指令（服务端也会再校验一次长度）
+            const inst = instruction.trim();
+            if (inst) fd.append('instruction', inst);
           } else if (tab === 'image-card') {
             for (const f of imgRef.current.files) fd.append('images', f, f.name);
           } else {
@@ -193,7 +257,7 @@ window.__ModuleLoader__.load({
           setError(e.message);
           setRunning(false);
         }
-      }, [tab, baseUrl, apiKey, model, title, text, strategy, chapterRange, openStream]);
+      }, [tab, baseUrl, apiKey, model, title, text, strategy, chapterRange, instruction, openStream]);
 
       const cancel = useCallback(async () => {
         if (!taskId) return;
@@ -241,21 +305,9 @@ window.__ModuleLoader__.load({
 
         // 按任务类型给对应输入
         tab === 'augment'
-          ? h('div', { className: 'n2c-col' },
-            h(Field, { label: '已有角色卡（character_card.json）' },
-              h('input', { className: 'n2c-input', type: 'file', accept: '.json', ref: cardRef })),
-            h(Field, { label: '新剧情文本' },
-              h('textarea', {
-                className: 'n2c-textarea', value: text,
-                onChange: e => setText(e.target.value), placeholder: '粘贴新增的章节内容…',
-              })),
-            h('div', { className: 'n2c-row' },
-              h(Field, { label: '合并策略' }, h('select', {
-                className: 'n2c-select', value: strategy, onChange: e => setStrategy(e.target.value),
-              },
-              h('option', { value: 'merge' }, 'merge（默认，追加进已有条目）'),
-              h('option', { value: 'append' }, 'append（只新增，不动已有）'),
-              h('option', { value: 'overwrite' }, 'overwrite（替换已有条目）')))))
+          ? h(AugmentFields, {
+            cardRef, text, setText, instruction, setInstruction, strategy, setStrategy,
+          })
           : tab === 'image-card'
             ? h('div', { className: 'n2c-col' },
               h(Field, { label: '图片（最多 60 张，超过 6 张自动分批）' },

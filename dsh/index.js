@@ -230,17 +230,33 @@ export function apply(ctx) {
       const novelText = String(fields.novelText || fields.text || '');
       if (!novelText.trim()) return sendJson(res, 400, { error: '完善任务需要新剧情文本' });
 
+      /**
+       * 完善指令：告诉这次要怎么做（挑哪些角色、地图势力要不要、是否贴合原卡）。
+       * 会拼进每个抽取步骤的 prompt（见 src/augment_context.js）。
+       * 限长与本地版一致 —— 这段文本进入每一次抽取调用，太长会把正文挤出上下文。
+       */
+      const instruction = String(fields.instruction || '').trim();
+      if (instruction.length > 2000) {
+        return sendJson(res, 400, {
+          error: `完善指令过长（${instruction.length} 字，上限 2000 字）：请精简后重试`,
+        });
+      }
+
       const dir = path.join(uploadRoot(), 'cards');
       await mkdir(dir, { recursive: true });
       const cardPath = path.join(dir, `card_${randomUUID().slice(0, 8)}.json`);
       await writeFile(cardPath, cardFile.data);
 
-      const job = await createJob({ kind, title, baseDir, input: { strategy: fields.strategy || 'merge' } });
+      const job = await createJob({
+        kind, title, baseDir,
+        input: { strategy: fields.strategy || 'merge', hasInstruction: !!instruction },
+      });
       kick(job, () => startAugment(job, {
         cardPath,
         novelText,
         strategy: String(fields.strategy || 'merge'),
         chapterRange: String(fields.chapterRange || 'all'),
+        instruction: instruction || undefined,
         ...common,
       }));
       return sendJson(res, 200, { taskId: job.taskId, kind });

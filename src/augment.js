@@ -24,6 +24,7 @@ import {
 } from './pipeline.js';
 import { isCharacterComment, tierFromComment, TIER_RANK } from './tiers.js';
 import { summarizeAugment, renderSummaryMarkdown } from './summary.js';
+import { buildCardWorldviewDigest, buildAugmentContext } from './augment_context.js';
 import * as S from './steps.js';
 
 // ============================================================
@@ -636,6 +637,27 @@ export async function runAugment(config, send) {
   const concurrency = Math.max(1, Number(config.concurrency) || 3);
   const charProbeChars = Number(config.charProbeChars) || 10000;
 
+  /**
+   * 用户指令 + 已有卡世界观摘要。
+   *
+   * 这一段会拼进**每个抽取步骤**的 user 消息。两条诉求：
+   *   · 指令：用户想怎么完善（挑哪些角色、地图势力要不要、要不要贴合原卡）
+   *   · 世界观：新抽的内容必须符合原卡世界观 —— 光说"要符合"而不给世界观内容，
+   *     模型只能猜，所以把已有卡的条目名 + 正文首句做成摘要一起喂进去。
+   */
+  const digest = buildCardWorldviewDigest(existing, { maxItems: Number(config.digestItems) || 60 });
+  const augmentCtx = buildAugmentContext({ instruction: config.instruction, digest });
+  if (config.instruction) {
+    log('Augment', `已附加用户指令（${String(config.instruction).trim().length} 字）`);
+  } else {
+    log('Augment', '未填用户指令：只按「符合已有卡世界观」这一条通用要求抽取');
+  }
+  if (digest) {
+    log('Augment', `已附加已有卡世界观摘要（${digest.length} 字）`);
+  } else {
+    log('WARN', '已有卡没有可用的世界观条目：新内容无法向原卡看齐，可能各写各的');
+  }
+
   // ---------- 3. 抽取新剧情的事件 / 阶段 / 人物 / 世界观 ----------
   //     复用与 runPipeline 相同的步骤 prompt，保证两边的抽取口径一致
   checkAbort();
@@ -643,7 +665,7 @@ export async function runAugment(config, send) {
   const eventsRaw = await pMap(chunks, async (c) => {
     try {
       // 用抽出来的解析函数（见 parseEventsResponse 注释：这里曾静默丢光全部事件）
-      const raw = await llm.chatJSON(S.STEP_2_EVENTS, `章节：${c.title}\n\n${c.text}`, 'step2');
+      const raw = await llm.chatJSON(S.STEP_2_EVENTS, `章节：${c.title}\n\n${c.text}${augmentCtx}`, 'step2');
       return parseEventsResponse(raw);
     } catch (e) {
       log('WARN', `章节事件抽取失败（${c.title}）：${e.message}`);
@@ -684,7 +706,11 @@ export async function runAugment(config, send) {
   log('Augment', '抽取世界观');
   let worldbookItems = [];
   try {
-    const r = await llm.chatJSON(S.STEP_5_WORLDBOOK, sampleAcrossText(joined, Number(config.worldProbeChars) || 15000), 'step5');
+    const r = await llm.chatJSON(
+      S.STEP_5_WORLDBOOK,
+      `${sampleAcrossText(joined, Number(config.worldProbeChars) || 15000)}${augmentCtx}`,
+      'step5',
+    );
     worldbookItems = normalizeWorldbookItems(r);
   } catch (e) { log('WARN', `世界观抽取失败：${e.message}`); }
 
@@ -692,7 +718,11 @@ export async function runAugment(config, send) {
   log('Augment', '抽取人物');
   let roster = [];
   try {
-    const raw = await llm.chatJSON(S.STEP_5_CHARACTER_LIST, `原文：\n${sampleAcrossText(joined, charProbeChars)}`, 'step5');
+    const raw = await llm.chatJSON(
+      S.STEP_5_CHARACTER_LIST,
+      `原文：\n${sampleAcrossText(joined, charProbeChars)}${augmentCtx}`,
+      'step5',
+    );
     roster = sanitizeRoster(raw, joined, { max: Number(config.maxCharacters) || 15 }).roster;
     log('Augment', `新人物名单 ${roster.length} 人`);
   } catch (e) { log('WARN', `人物名单抽取失败：${e.message}`); }
@@ -701,7 +731,8 @@ export async function runAugment(config, send) {
     try {
       const item = await llm.chatJSON(
         S.STEP_5_CHARACTER,
-        `角色名：${r.name}\n已知称呼：${[r.name, ...r.aliases].join('、')}\n\n原文节选：\n${sampleAcrossText(joined, charProbeChars)}`,
+        `角色名：${r.name}\n已知称呼：${[r.name, ...r.aliases].join('、')}\n\n`
+          + `原文节选：\n${sampleAcrossText(joined, charProbeChars)}${augmentCtx}`,
         'step5',
       );
       // 用抽出来的解析函数（见 parseCharacterProfile 注释：字段名曾写错，档案恒为 0 份）

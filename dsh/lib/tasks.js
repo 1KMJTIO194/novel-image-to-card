@@ -152,6 +152,8 @@ export async function startGenerate(job, {
 export async function startAugment(job, {
   cardPath, novelText, novelPath = null, strategy = 'merge',
   baseUrl, apiKey, model, chapterRange = 'all', preset = null, options = {},
+  // 完善指令：拼进每个抽取步骤的 prompt（见 src/augment_context.js）
+  instruction = undefined,
 }) {
   const { runAugment } = await importCore('augment.js');
 
@@ -162,7 +164,11 @@ export async function startAugment(job, {
   }
 
   job.emit('start', { taskId: job.taskId, startedAt: job.startedAt });
-  job.emit('progress', { step: 'Init', msg: `增补任务已创建（策略：${strategy}）`, ts: Date.now() });
+  job.emit('progress', {
+    step: 'Init',
+    msg: `增补任务已创建（策略：${strategy}${instruction ? '，带完善指令' : ''}）`,
+    ts: Date.now(),
+  });
 
   return runAugment({
     outDir: job.outDir,
@@ -172,6 +178,8 @@ export async function startAugment(job, {
     novelText,
     strategy,
     chapterRange: chapterRange || 'all',
+    // 用户指令（undefined 时 augment 里会走"未填指令"的分支并打日志）
+    instruction,
     baseUrl: String(baseUrl || '').replace(/\/+$/, ''),
     apiKey,
     model,

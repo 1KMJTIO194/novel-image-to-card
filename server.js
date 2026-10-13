@@ -827,13 +827,27 @@ app.post(
         return res.end();
       }
 
-      const { baseUrl, apiKey, model, chapterRange, strategy, preset, options } = req.body || {};
+      const { baseUrl, apiKey, model, chapterRange, strategy, preset, options, instruction } = req.body || {};
       if (!baseUrl || !model) {
         send('error', { message: 'API 配置不完整（需要 Base URL 与模型名）' });
         return res.end();
       }
       if (!apiKey && !/localhost|127\.0\.0\.1|0\.0\.0\.0/.test(baseUrl)) {
         send('error', { message: '缺少 API Key' });
+        return res.end();
+      }
+
+      /**
+       * 用户指令：告诉这次完善要怎么做（挑哪些角色、地图势力要不要、是否贴合原卡）。
+       * 会拼进每个抽取步骤的 prompt（见 src/augment_context.js）。
+       *
+       * 限长是必要的：这段文本会进入**每一次**抽取调用，塞一整本书进来
+       * 会把新剧情正文挤出上下文。
+       */
+      const inst = String(instruction || '').trim();
+      const INST_MAX = 2000;
+      if (inst.length > INST_MAX) {
+        send('error', { message: `完善指令过长（${inst.length} 字，上限 ${INST_MAX} 字）：请精简后重试` });
         return res.end();
       }
 
@@ -868,6 +882,8 @@ app.post(
         novelText: novelFile ? null : String(pastedText),
         chapterRange: chapterRange || 'all',
         strategy: strategyName,
+        // 用户指令：拼进每个抽取步骤的 prompt
+        instruction: inst || undefined,
         outputDir: OUTPUT_DIR,
         preset: presetObj,
         signal: controller.signal,

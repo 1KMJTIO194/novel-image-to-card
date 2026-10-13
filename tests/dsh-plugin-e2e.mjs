@@ -424,6 +424,86 @@ console.log('\n【6】取消路径');
 }
 
 // ============================================================
+console.log('\n【6b】完善指令：真的进了 prompt，且限长');
+{
+  /**
+   * 用户诉求：「让小说中的角色合并到角色卡里并且角色设定要符合角色卡世界观」。
+   * 指令要拼进每个抽取步骤；已有卡的世界观摘要也要一并喂进去。
+   * 这里用假 LLM 抓实际请求体验证接线。
+   */
+  const card = {
+    spec: 'chara_card_v3', spec_version: '3.0',
+    data: {
+      name: '云京旧案', description: 'd', personality: '', scenario: '',
+      first_mes: 'f', mes_example: '', tags: [], creator: '',
+      character_version: '1.0', alternate_greetings: [], extensions: {},
+      character_book: {
+        name: '云京世界书',
+        entries: [
+          { id: 0, comment: '[map_world] 云京', keys: ['云京'], content: 'name: 云京\ntype: 世界\n地理概况: 王朝都城。', constant: true, enabled: true, insertion_order: 1, extensions: { group: 'map_world' } },
+          { id: 1, comment: '[system_faction] 缉影司', keys: ['缉影司'], content: 'name: 缉影司\ntype: 势力\n运作原理: 掌查密案。', constant: false, enabled: true, insertion_order: 2, extensions: { group: 'system_faction' } },
+        ],
+      },
+    },
+  };
+
+  // 请求体里有 instruction / 云京 / 缉影司的调用数
+  const before = received.length;
+
+  const INSTR = '只合并角色，角色设定必须符合原卡世界观；地图势力也纳入，但沿用原卡地名';
+  const fd = new FormData();
+  fd.append('kind', 'augment');
+  fd.append('baseUrl', `http://127.0.0.1:${LLM_PORT}/v1`);
+  fd.append('apiKey', 'test');
+  fd.append('model', 'mock-model');
+  fd.append('title', '带指令的完善');
+  fd.append('strategy', 'merge');
+  fd.append('instruction', INSTR);
+  fd.append('novelText', CH);
+  fd.append('card', new Blob([JSON.stringify(card)], { type: 'application/json' }), 'card.json');
+
+  const res = await fetch(`${BASE}/novel2card/generate`, { method: 'POST', body: fd });
+  const cj = await res.json();
+  ok('带指令的完善任务能创建', res.status === 200 && !!cj.taskId,
+    `${res.status} ${JSON.stringify(cj).slice(0, 120)}`);
+
+  if (cj.taskId) {
+    const events = await collectStream(cj.taskId, 60000);
+    const doneEv = events.find(e => e.event === 'done');
+    // 允许 done 或 error（假 LLM 对 augment 的返回形状不保证完美），
+    // 关键看**发出的请求体**里有没有指令与世界观摘要
+    ok('任务收尾（done 或 error 都算跑到了）', !!doneEv, JSON.stringify(events.map(e => e.event)));
+
+    const sent = received.slice(before);
+    ok('augment 真的调用了 LLM', sent.length > 0, String(sent.length));
+    const withInstr = sent.filter(r => String(r.user).includes(INSTR));
+    ok('指令进了至少 2 个步骤的 prompt', withInstr.length >= 2, String(withInstr.length));
+    ok('指令被标为高优先级', withInstr.some(r => /优先级高于/.test(String(r.user))));
+
+    const withDigest = sent.filter(r => String(r.user).includes('已有角色卡的世界观'));
+    ok('已有卡世界观摘要也进了 prompt', withDigest.length >= 1, String(withDigest.length));
+    ok('摘要含原卡地名「云京」', withDigest.some(r => String(r.user).includes('云京')), '');
+    ok('摘要含原卡势力「缉影司」', withDigest.some(r => String(r.user).includes('缉影司')), '');
+    ok('摘要带一致性要求', withDigest.some(r => /沿用已有卡的说法/.test(String(r.user))), '');
+  }
+
+  // 限长：超过 2000 字要拒，且给出可读原因
+  const big = new FormData();
+  big.append('kind', 'augment');
+  big.append('baseUrl', `http://127.0.0.1:${LLM_PORT}/v1`);
+  big.append('model', 'mock-model');
+  big.append('novelText', CH);
+  big.append('instruction', 'x'.repeat(2001));
+  big.append('card', new Blob([JSON.stringify(card)], { type: 'application/json' }), 'card.json');
+  const bigRes = await fetch(`${BASE}/novel2card/generate`, { method: 'POST', body: big });
+  const bigJson = await bigRes.json();
+  ok('超长指令被拒（400）', bigRes.status === 400, String(bigRes.status));
+  ok('超长指令的报错说明上限与当前长度',
+    /2000/.test(bigJson.error || '') && /2001/.test(bigJson.error || ''),
+    JSON.stringify(bigJson));
+}
+
+// ============================================================
 console.log('\n【7】信任栅栏：非本机 / 跨站请求必须被拒');
 {
   /**
