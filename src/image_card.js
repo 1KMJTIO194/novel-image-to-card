@@ -31,7 +31,7 @@ import { summarizeGenerate, renderSummaryMarkdown } from './summary.js';
 import { sliceAllForVision } from './image_slice.js';
 import {
   assembleCharacterCard, assembleWorldbook, buildVariables, initializeUserNamespace,
-  inspectContentYaml, isPlaceholderBody, makeStatusbarPreview,
+  inspectContentYaml, isPlaceholderBody, makeStatusbarPreview, groupByStoryline,
 } from './pipeline.js';
 
 /** 单张图片允许的大小上限（字节）。上游对超大图会直接判定为 unsupported。 */
@@ -956,6 +956,138 @@ export function renderWorldbookFromProfiles(profiles = [], { title = '' } = {}) 
 }
 
 /**
+ * 图片内容的时间线。
+ *
+ * **不像小说路径那样调用 `solveTimeline`**：那个函数是给有章节号与明确日期
+ * 的长篇小说用的，它会挑一个日期锚点、按相对/模糊/周期分类、推出世界日期。
+ * 截图转录里通常只有"10小时前""26年10月11日"这类社交平台时间戳，
+ * 拿它们当世界日期会造出一套**看似精确其实错误**的时间体系。
+ *
+ * 所以这里如实标注"时间信息来自图片，未做日期推断"，事件仍按抽取顺序排列。
+ */
+export function buildImageTimeline(events = []) {
+  const first = events[0]?.name || '';
+  return {
+    base: '相对纪元',
+    origin: {
+      raw: '',
+      event: first,
+      reason: '图片内容未提供可用的时间锚点，以首个事件为起点',
+    },
+    events: events.map(e => ({
+      name: e.name,
+      // 事件自带的时间文本（模型从转录里读到的，如"10小时前"）原样保留
+      time: e.time || '',
+      chapter: e.chapter || '',
+      pressure: e.pressure || 'normal',
+      dateKey: null,
+    })),
+    characters: [],
+    worldDate: null,
+    history: [],
+    relativeStats: { relative: 0, vague: 0, periodic: 0 },
+    fromEvents: true,
+    /** 标记：时间线未做日期推断，下游不要当成确切日期用 */
+    approximate: true,
+  };
+}
+
+/**
+ * 合并"文字抽出来的人物"与"画面认出来的人物"。
+ *
+ * 文字给出身份、经历、关系（`nar.characters` 的 profile）；
+ * 画面给出外貌、服饰、体型（`profiles`）。两边都要，缺一边卡就不完整。
+ *
+ * 配对靠**名字模糊匹配**（归一化后互为子串，或命中对方的别名/文字称呼）。
+ * 配不上的两边都保留：
+ *   · 只在文字里出现的（例如"室友"没露脸）→ 仍然成条，外貌写"图片未提供"
+ *   · 只在画面里出现的（例如正文没提到的路人）→ 用视觉档案成条
+ * 宁可多一条，也不要因为匹配不上就丢人。
+ *
+ * @param {Array} narChars `nar.characters`：`{name, aliases, profile}`
+ * @param {Array} profiles 视觉档案
+ * @param {string} protagonistName
+ */
+export function mergeNarrativeCharacters(narChars = [], profiles = [], protagonistName = '') {
+  const usedProfiles = new Set();
+
+  /** 名字归一化：去空格、大小写、常见后缀与「（图N）」 */
+  const norm = (s) => String(s || '')
+    .replace(/[（(]\s*图\s*\d+\s*[)）]/g, '')
+    .replace(/[\s·・.、,，。!！?？"'"'']+/g, '')
+    .toLowerCase();
+
+  /** 找一个视觉档案与这个文字人物对应 */
+  const findProfile = (name, aliases = []) => {
+    const cands = [name, ...aliases].map(norm).filter(Boolean);
+    if (!cands.length) return -1;
+    for (const [i, p] of profiles.entries()) {
+      if (usedProfiles.has(i)) continue;
+      const pnames = [p.name, ...(p.namesFromText || []), ...(p.aliases || [])].map(norm).filter(Boolean);
+      for (const a of cands) {
+        for (const b of pnames) {
+          if (!a || !b) continue;
+          if (a === b || (a.length >= 2 && b.includes(a)) || (b.length >= 2 && a.includes(b))) return i;
+        }
+      }
+    }
+    return -1;
+  };
+
+  const out = [];
+  for (const [idx, c] of narChars.entries()) {
+    const name = String(c?.name || '').trim();
+    if (!name) continue;
+    const aliases = Array.isArray(c?.aliases) ? c.aliases.filter(Boolean) : [];
+    const pi = findProfile(name, aliases);
+    const p = pi >= 0 ? profiles[pi] : null;
+    if (pi >= 0) usedProfiles.add(pi);
+
+    // 文字侧的内容（profile 可能是 {content_yaml} 或原始对象）
+    const rawProfile = c?.profile ?? {};
+    const contentYaml = String(
+      rawProfile.content_yaml ?? rawProfile.content ?? rawProfile.text ?? rawProfile.yaml ?? '',
+    ).trim();
+
+    out.push({
+      name,
+      /**
+       * 分层：文字抽出来的第一个人视为主角。
+       *
+       * 图片路径没有"出场章节数"这个概念，所以不套小说路径的剧情占比分层
+       *（那会得到一堆"100%"的无意义分层）。
+       */
+      tier: idx === 0 || name === protagonistName ? '主角' : '主要NPC',
+      role: idx === 0 ? '主角' : '主要NPC',
+      // 文字档案为主；没有就退回视觉档案的 YAML
+      content_yaml: contentYaml || (p ? renderContentYaml(p, { protagonistName }) : ''),
+      aliases: [...new Set([...aliases, ...((p?.aliases) || [])])],
+      // 画面侧的溯源信息（有就带上）
+      ...(p ? { imageIndex: p.imageIndex, confidence: p.confidence } : {}),
+      fromNarrative: true,
+    });
+  }
+
+  // 只在画面里出现、文字里没提到的人物：不能丢
+  for (const [i, p] of profiles.entries()) {
+    if (usedProfiles.has(i)) continue;
+    out.push({
+      name: p.name,
+      tier: out.length === 0 ? '主角' : '主要NPC',
+      role: out.length === 0 ? '主角' : '主要NPC',
+      content_yaml: renderContentYaml(p, { protagonistName }),
+      aliases: p.aliases || [],
+      imageIndex: p.imageIndex,
+      confidence: p.confidence,
+      /** 标记：这条只有画面信息，文字里没出现 */
+      visualOnly: true,
+    });
+  }
+
+  return out;
+}
+
+/**
  * 装配段：由抽取结果生成完整的卡（变量树 + 状态栏 + 正则 + 世界书 + 完整卡）。
  *
  * **不调用模型** —— 状态栏与组装都是纯函数，所以这一整段可以用注入的
@@ -973,59 +1105,105 @@ export async function buildCardFromExtraction(cfg = {}) {
   const title = String(cfg.title || '图片生成的角色卡').trim();
   const protagonistName = String(cfg.userMode?.protagonistName || profiles[0]?.name || '').trim();
 
-  // ---------- 1. 人物条目：图片路径只产出「主角 + 其他角色」两层 ----------
-  // 不套用小说路径的剧情占比分层 —— 图片没有"出场章节"这个概念，
-  // 硬套会得到一堆"100%"的无意义分层。
-  const characters = profiles.map((p, i) => ({
-    name: p.name,
-    tier: i === 0 || p.name === protagonistName ? '主角' : '主要NPC',
-    role: i === 0 ? '主角' : '主要NPC',
-    content_yaml: renderContentYaml(p, { protagonistName }),
-    aliases: p.aliases || [],
-    imageIndex: p.imageIndex,
-    confidence: p.confidence,
-  }));
-
-  // ---------- 2. 事件：图片不给剧情，所以只造一个「开场」占位 ----------
   /**
-   * 为什么必须造这个事件：`buildVariables` 在事件为空时会兜底一个「开场」，
-   * 但那个兜底的语义是"小说没有事件"；这里的情况不同 —— 图片路径**本来就没有剧情**。
-   * 明确地造一个"与这些角色相遇"的开场，让导演指令与状态栏有落点，
-   * 而不是让 AI 在空事件表上猜。
+   * 叙事抽取结果（把图片内容当"原文"抽出来的剧情结构）。
+   *
+   * 这是图片路径的**主路径**：有它的时候，事件 / 故事线 / 阶段 / 世界观
+   * 都来自真正的剧情抽取，而不是"与XX相遇"的占位。
+   * 没有它（纯立绘、没有可读文字）才回退到旧的"只有外貌"模式。
    */
-  const firstChar = characters[0]?.name || '角色';
-  const openerName = `与${firstChar}相遇`;
-  const events = [{
-    name: openerName,
-    pressure: 'core',
-    chapter: '图片设定',
-    time: '',
-    storyline: '开场',
-    // 在场角色 = 图片里识别出的所有人（用户以 {{user}} 身份进入，不列进来）
-    participants: characters.map(c => c.name),
-    location: profiles.find(p => p.scene)?.scene || '',
-  }];
-  const storylines = { 开场: { events: [openerName], core: true, line: '开场' } };
-  const timeline = {
-    base: '相对纪元',
-    origin: { raw: '图片设定', event: openerName, reason: '图片来源没有时间信息，以开场为原点' },
-    events: events.map(e => ({
-      name: e.name, time: e.time, chapter: e.chapter,
-      pressure: e.pressure, dateKey: null,
-    })),
-    characters: [],
-    worldDate: null,
-    history: [],
-    relativeStats: { relative: 0, vague: 0, periodic: 0 },
-    fromEvents: true,
-  };
-  const phasesWithDeltas = [{
-    name: '开场',
-    startEvent: openerName,
-    endEvent: openerName,
-    text: '图片生成的开场：用户与这些角色初次相遇。',
-    characterDeltas: [],
-  }];
+  const nar = cfg.narrative && typeof cfg.narrative === 'object' ? cfg.narrative : null;
+  const useNarrative = !!nar && Array.isArray(nar.events) && nar.events.length > 0;
+
+  // ---------- 1. 人物条目 ----------
+  /**
+   * 两条信息源合一：
+   *   · 叙事抽取（`extractNarrativeFromImages`）给出**身份 / 经历 / 关系**（来自文字）
+   *   · 视觉档案（`profiles`）给出**外貌 / 服饰 / 体型**（来自画面）
+   * 文字里有、画面里没有的（身份），与画面里有、文字里没有的（外貌）都要保住。
+   */
+  const characters = useNarrative && Array.isArray(nar.characters) && nar.characters.length
+    ? mergeNarrativeCharacters(nar.characters, profiles, protagonistName)
+    : profiles.map((p, i) => ({
+      name: p.name,
+      tier: i === 0 || p.name === protagonistName ? '主角' : '主要NPC',
+      role: i === 0 ? '主角' : '主要NPC',
+      content_yaml: renderContentYaml(p, { protagonistName }),
+      aliases: p.aliases || [],
+      imageIndex: p.imageIndex,
+      confidence: p.confidence,
+    }));
+
+  // ---------- 2. 事件 / 故事线 / 时间线 / 阶段 ----------
+  let events;
+  let storylines;
+  let timeline;
+  let phasesWithDeltas;
+
+  if (useNarrative) {
+    /**
+     * **主路径**：事件、故事线、阶段都来自把图片内容当"原文"的抽取
+     *（`extractNarrativeFromImages` 复用小说路径的 STEP prompt）。
+     *
+     * 与小说路径的区别只在"时间"：`solveTimeline` 是给有章节与日期信息的
+     * 长篇小说用的，截图转录里通常没有稳定日期，硬套会造出一堆假的日期锚点。
+     * 所以这里保留抽取到的事件与故事线，时间线则**如实标注"未提供时间信息"**。
+     */
+    events = nar.events;
+    storylines = nar.storylines && Object.keys(nar.storylines).length
+      ? nar.storylines
+      : groupByStoryline(events);
+    phasesWithDeltas = Array.isArray(nar.phases) && nar.phases.length
+      ? nar.phases
+      : [{
+        name: '开场',
+        startEvent: events[0]?.name || '',
+        endEvent: events[events.length - 1]?.name || '',
+        text: '图片内容的时间线未提供，以首个事件为起点。',
+        characterDeltas: [],
+      }];
+    timeline = buildImageTimeline(events);
+  } else {
+    /**
+     * **回退路径**：纯立绘 / 没有可读文字时，抽不出剧情。
+     *
+     * 造一个"与这些角色相遇"的开场占位，让导演指令与状态栏有落点，
+     * 而不是让 AI 在空事件表上猜。这是原来唯一的行为，现在只在没有原文时使用。
+     */
+    const firstChar = characters[0]?.name || '角色';
+    const openerName = `与${firstChar}相遇`;
+    events = [{
+      name: openerName,
+      pressure: 'core',
+      chapter: '图片设定',
+      time: '',
+      storyline: '开场',
+      // 在场角色 = 图片里识别出的所有人（用户以 {{user}} 身份进入，不列进来）
+      participants: characters.map(c => c.name),
+      location: profiles.find(p => p.scene)?.scene || '',
+    }];
+    storylines = { 开场: { events: [openerName], core: true, line: '开场' } };
+    timeline = {
+      base: '相对纪元',
+      origin: { raw: '图片设定', event: openerName, reason: '图片来源没有时间信息，以开场为原点' },
+      events: events.map(e => ({
+        name: e.name, time: e.time, chapter: e.chapter,
+        pressure: e.pressure, dateKey: null,
+      })),
+      characters: [],
+      worldDate: null,
+      history: [],
+      relativeStats: { relative: 0, vague: 0, periodic: 0 },
+      fromEvents: true,
+    };
+    phasesWithDeltas = [{
+      name: '开场',
+      startEvent: openerName,
+      endEvent: openerName,
+      text: '图片生成的开场：用户与这些角色初次相遇。',
+      characterDeltas: [],
+    }];
+  }
 
   // ---------- 3. 变量树 ----------
   /**
@@ -1047,10 +1225,24 @@ export async function buildCardFromExtraction(cfg = {}) {
   const variables = buildVariables(timeline, events, storylines, characters, phasesWithDeltas);
   initializeUserNamespace(variables, userMode);
 
-  // ---------- 4. 世界观（默认开，可从图片线索推） ----------
-  const worldbookItems = cfg.wantWorldbook === false
-    ? []
-    : renderWorldbookFromProfiles(profiles, { title });
+  // ---------- 4. 世界观 ----------
+  /**
+   * 有叙事抽取时，世界观条目用**抽出来的**（地点 / 势力 / 体系 / 历史）——
+   * 这才是"和小说路径一样"。
+   * 抽不到才回退到"从画面线索推"的保守版本。
+   *
+   * 另外始终补一条「图中文字（转录）」：那些文字是可靠信息，
+   * 不该因为走了叙事路径就丢掉。
+   */
+  let worldbookItems = [];
+  if (cfg.wantWorldbook !== false) {
+    const fromNarrative = useNarrative && Array.isArray(nar.worldbookItems) ? nar.worldbookItems : [];
+    const transcriptItems = renderWorldbookFromProfiles(profiles, { title })
+      .filter(i => /图中文字/.test(i.name));
+    worldbookItems = fromNarrative.length
+      ? [...fromNarrative, ...transcriptItems]
+      : renderWorldbookFromProfiles(profiles, { title });
+  }
   const worldbook = assembleWorldbook(timeline, events, characters, worldbookItems, {
     title,
     protagonist: protagonistName,
