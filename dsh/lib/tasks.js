@@ -258,6 +258,38 @@ export async function startImageCard(job, {
           + `体系 ${settingSummary.world.systems.length}`,
         ts: Date.now(),
       });
+
+      /**
+       * 主要角色的外貌/服装精修 —— 必须和 Web 版保持一致。
+       *
+       * 用户反馈过：主要 NPC 的外貌服装写得太薄、有遗漏。
+       * 这里是它们单独再跑一次"只看外观"的带图请求。
+       */
+      try {
+        const { refineMainAppearance } = await importCore('image_detail.js');
+        const refined = await refineMainAppearance({
+          llm: summaryLlm,
+          summary: settingSummary,
+          images: imagePaths.map((p, i) => ({ index: i, path: p })),
+          profiles: vision.profiles,
+          max: 3,
+          send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
+        });
+        if (refined.refined.length) {
+          emit('progress', {
+            step: 'Detail',
+            msg: `主要角色外观精修完成：${refined.refined.map(r => r.name).join('、')}`
+              + (refined.skipped.length ? `（跳过 ${refined.skipped.length} 个）` : ''),
+            ts: Date.now(),
+          });
+        }
+      } catch (e) {
+        emit('progress', {
+          step: 'WARN',
+          msg: `主要角色外观精修失败（保留原有描述）：${e.message}`,
+          ts: Date.now(),
+        });
+      }
     } else {
       emit('progress', {
         step: 'Summary',

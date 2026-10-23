@@ -143,9 +143,10 @@ if (!vision.quality?.usable) {
 
 console.log('\n=== 2/3 总结信息成设定 ===');
 let summary = null;
+let llm = null;
 try {
   const { makeLLM } = await import(pathToFileURL(path.join(ROOT, 'src/llm.js')).href);
-  const llm = makeLLM({ baseUrl, apiKey, model }, null);
+  llm = makeLLM({ baseUrl, apiKey, model }, null);
   summary = await extractCardSummary({ llm, profiles: vision.profiles, hint: hint || undefined, send: onProgress });
 } catch (e) {
   console.warn(`  总结失败（会回退到画面事实）：${e.message}`);
@@ -153,6 +154,29 @@ try {
 console.log(summary
   ? `  人物 ${summary.characters.length} · 地点 ${summary.world.locations.length} · 势力 ${summary.world.factions.length}`
   : '  没有总结出设定，按画面事实生成');
+
+/**
+ * 主要角色外观精修（第三个入口也必须接，否则同一个功能在各入口行为不一致
+ * —— 上一轮"叙事抽取只接了 Web 版"就是这么漏的）。
+ */
+if (summary && llm && !args['no-refine']) {
+  try {
+    const { refineMainAppearance } = await import(pathToFileURL(path.join(ROOT, 'src/image_detail.js')).href);
+    const r = await refineMainAppearance({
+      llm,
+      summary,
+      images: images.map((p, i) => ({ index: i, path: p })),
+      profiles: vision.profiles,
+      max: Math.max(0, Math.min(5, Number(args['detail-max']) || 3)),
+      send: onProgress,
+    });
+    console.log(r.refined.length
+      ? `  主要角色外观精修：${r.refined.map(x => `${x.name}(${x.appearanceLen}字)`).join('、')}`
+      : `  主要角色外观精修：无（跳过 ${r.skipped.length}）`);
+  } catch (e) {
+    console.warn(`  外观精修失败（保留原描述）：${e.message}`);
+  }
+}
 
 console.log('\n=== 3/3 装配 + 落盘 ===');
 const result = await buildCardFromExtraction({ profiles: vision.profiles, title, summary, wantWorldbook: true });

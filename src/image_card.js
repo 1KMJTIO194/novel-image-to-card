@@ -28,6 +28,7 @@ import { varKey } from './utils.js';
 import { parseDateParts } from './dates.js';
 import { generateStatusbar, THEMES } from './step75_statusbar.js';
 import { summarizeGenerate, renderSummaryMarkdown } from './summary.js';
+import { normalizeTier } from './tiers.js';
 import { sliceAllForVision } from './image_slice.js';
 import {
   renderSettingsYaml, worldbookFromSummary, cardFieldsFromSummary, openerFromSummary,
@@ -1075,11 +1076,21 @@ export function mergeSummaryCharacters(summaryChars = [], profiles = [], protago
     const p = pi >= 0 ? profiles[pi] : null;
     if (pi >= 0) usedProfiles.add(pi);
 
+    /**
+     * 分层：**优先用总结时标注的 importance**（主角 / 主要NPC / 次要NPC / 路人NPC）。
+     *
+     * 图片路径没有"出场章节数"，所以不能套小说那套剧情占比分层；
+     * 但"谁是主要角色"这件事模型从资料里判断得出来 —— 而这个分层直接决定
+     * 后面**给谁做外观精修**（主要角色才值得多花一次带图请求）。
+     * 没有 importance 的老数据退回"第一个是主角、其余主要NPC"。
+     */
+    const imp = normalizeTier(String(c?.importance || '').trim(), idx === 0 ? '主角' : '主要NPC');
+    const tier = name === protagonistName ? '主角' : imp;
+
     out.push({
       name,
-      /** 图片路径没有"出场章节数"，不套小说的剧情占比分层 */
-      tier: idx === 0 || name === protagonistName ? '主角' : '主要NPC',
-      role: idx === 0 ? '主角' : '主要NPC',
+      tier,
+      role: tier,
       // 设定 YAML：外貌缺失时用画面事实补
       content_yaml: renderSettingsYaml(c, p),
       aliases: [...new Set([...aliases, ...((p?.aliases) || [])])],

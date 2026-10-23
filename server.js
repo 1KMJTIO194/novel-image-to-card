@@ -30,6 +30,7 @@ import {
   MAX_IMAGES, DEFAULT_VISION_BATCH, DEFAULT_VISION_CONCURRENCY,
 } from './src/image_card.js';
 import { extractCardSummary } from './src/image_summary.js';
+import { refineMainAppearance } from './src/image_detail.js';
 import { summarizeAugment, summarizeGenerate, renderSummaryMarkdown } from './src/summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1177,6 +1178,47 @@ app.post(
             + `体系 ${settingSummary.world.systems.length}`,
           ts: Date.now(),
         });
+
+        /**
+         * 主要角色的**外貌/服装精修**（用户要求）。
+         *
+         * 为什么要单独一轮：总结那步要同时产出人物 + 世界观 + 舞台，注意力被摊薄，
+         * 外貌/服装往往只剩一句"黑色长发、深色外套"。而这两项是**图片独有的信息**。
+         * 所以对 主角 / 主要NPC 再各跑一次「只看外观」的请求。
+         *
+         * 可以用 `refineMainAppearance:false` 关掉（每多一个主要角色就多一次带图请求）。
+         */
+        if (opts.refineMainAppearance !== false) {
+          try {
+            const summaryLlm = makeLLM({
+              baseUrl: String(baseUrl).replace(/\/+$/, ''),
+              apiKey, model,
+            }, preset || null);
+            const refined = await refineMainAppearance({
+              llm: summaryLlm,
+              summary: settingSummary,
+              images: localImages.map((p, i) => ({ index: i, path: p })),
+              profiles: vision.profiles,
+              max: Math.max(0, Math.min(5, Number(opts.detailMax) || 3)),
+              send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
+            });
+            if (refined.refined.length) {
+              emit('progress', {
+                step: 'Detail',
+                msg: `主要角色外观精修完成：${refined.refined.map(r => r.name).join('、')}`
+                  + (refined.skipped.length ? `（跳过 ${refined.skipped.length} 个）` : ''),
+                ts: Date.now(),
+              });
+            }
+          } catch (e) {
+            // 精修失败不影响主流程
+            emit('progress', {
+              step: 'WARN',
+              msg: `主要角色外观精修失败（保留原有描述）：${e.message}`,
+              ts: Date.now(),
+            });
+          }
+        }
       } else {
         emit('progress', {
           step: 'Summary',

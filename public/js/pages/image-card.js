@@ -231,6 +231,10 @@ export async function renderImageCard(mount) {
   const worldToggle = el('input', {
     type: 'checkbox', id: 'image-card-world', name: 'wantWorldbook', checked: true,
   });
+  /** 主要角色外观精修（默认开；关掉可省每个主要角色一次带图请求） */
+  const refineToggle = el('input', {
+    type: 'checkbox', id: 'image-card-refine', name: 'refineMainAppearance', checked: true,
+  });
 
   page.appendChild(el('div', { class: 'card' },
     el('h3', { text: '② 设定（都可选）' }),
@@ -244,6 +248,22 @@ export async function renderImageCard(mount) {
       el('span', { text: '生成世界观条目（世界概览 + 画面中出现的场景）' })),
     el('div', { class: 'hint', style: { marginTop: '4px' },
       text: '图片只能推出很粗的世界观（场景、题材线索），条目会明确标注"由图片推断"。' }),
+
+    /**
+     * 主要角色外观精修开关（默认开）。
+     *
+     * 为什么值得多花这几次请求：外观与服装是**图片独有的信息**，
+     * 但一次总结里要做人物 + 世界观 + 舞台，注意力被摊薄，
+     * 主要角色的外貌往往只剩一句"黑色长发、深色外套"。
+     * 打开后会对 主角 / 主要NPC 分别再跑一次「只看外观」的请求，
+     * 每个主要角色多一次请求。
+     */
+    el('label', { class: 'check', style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '10px' } },
+      refineToggle,
+      el('span', { text: '✨ 主要角色外观精修（推荐）' })),
+    el('div', { class: 'hint', style: { marginTop: '4px' },
+      text: '对分辨出的 主角 / 主要NPC，各再跑一次只看外观与服装的请求，把发色发型、五官、'
+        + '服装层次与配饰写细。每个主要角色多 1 次带图请求；关掉则沿用总结里那一句。' }),
   ));
 
   // ============================================================
@@ -424,6 +444,8 @@ export async function renderImageCard(mount) {
     fd.append('title', titleInput.value.trim() || '图片生成的角色卡');
     fd.append('hint', hintInput.value.trim());
     fd.append('wantWorldbook', worldToggle.checked ? 'true' : 'false');
+    // 主要角色外观精修（服务端 options.refineMainAppearance）
+    fd.append('options', JSON.stringify({ refineMainAppearance: refineToggle.checked }));
     // 分批张数：长漫画可调；后端会 clamp 到 1..12
     fd.append('batchSize', String(Math.max(1, Math.min(12, Number(batchInput.value) || VISION_BATCH))));
 

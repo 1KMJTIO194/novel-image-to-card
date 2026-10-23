@@ -165,6 +165,15 @@ export function normalizeSummary(raw) {
       return {
         name: g('name', '姓名'),
         aliases: (Array.isArray(c.aliases) ? c.aliases : []).map(String).map(x => x.trim()).filter(Boolean),
+        /**
+         * 重要性：主角 / 主要NPC / 次要NPC / 路人NPC。
+         *
+         * ⚠️ 必须保留 —— 它决定**谁值得做外观精修**。
+         * 踩过的坑：一开始漏了这个字段，归一化后 everybody 都没有 importance，
+         * 精修步骤退回"前 N 个都当主要角色"，于是路人也被单独精修，
+         * 白白多花请求（而且把次要角色写得过详，焦点反而错了）。
+         */
+        importance: g('importance'),
         gender: g('gender'),
         age: g('age'),
         identity: g('identity'),
