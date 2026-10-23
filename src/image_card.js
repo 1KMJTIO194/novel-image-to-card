@@ -19,7 +19,7 @@
  *
  * 后者可以用注入的抽取结果完整验证（见 tests/image-card.mjs）。
  */
-import { readFile, writeFile, mkdir, copyFile, readdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { makeLLM, inferImageMime } from './llm.js';
@@ -111,9 +111,61 @@ export function validateImages(imagePaths = []) {
   return { ok: errors.length === 0, errors, warnings, images };
 }
 
+/**
+ * 扫描一个**本机目录**里的图片，按页序排好。
+ *
+ * 用途：漫画/本子通常是"一个目录一话"，几百上千张一页一页选很不现实。
+ * 网页版与命令行工具（scripts/image-card-from-dir.mjs）共用这一份。
+ *
+ * @param {string} dirPath 绝对目录路径
+ * @param {{max?:number}} [opts]
+ * @returns {Promise<{ok:boolean, errors:string[], warnings:string[], images:string[]}>}
+ */
+export async function listImagesInDir(dirPath, { max = MAX_IMAGES } = {}) {
+  const errors = [];
+  const warnings = [];
+  const dir = path.resolve(String(dirPath || ''));
+
+  let entries;
+  try {
+    const st = await stat(dir);
+    if (!st.isDirectory()) {
+      return { ok: false, errors: [`不是一个目录：${dir}`], warnings, images: [] };
+    }
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (e) {
+    const msg = e?.code === 'ENOENT'
+      ? `目录不存在：${dir}`
+      : `读取目录失败：${e.message}`;
+    return { ok: false, errors: [msg], warnings, images: [] };
+  }
+
+  /**
+   * 排序按**自然序**：`0001.webp` 这种补零命名直接字典序就对，
+   * 但 `1.jpg, 2.jpg, 10.jpg` 用字典序会把 10 排到 2 前面 ——
+   * 漫画页序错了整本的剧情就乱了。
+   */
+  const images = entries
+    .filter(e => e.isFile() && ALLOWED_EXT.has(path.extname(e.name).toLowerCase()))
+    .map(e => path.join(dir, e.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true }));
+
+  if (!images.length) {
+    errors.push(`目录里没有图片（支持 ${[...ALLOWED_EXT].join(' / ')}）：${dir}`);
+  }
+  if (images.length > max) {
+    errors.push(`目录里有 ${images.length} 张图，超过一次 ${max} 张上限：请按话/卷拆分目录后分批生成`);
+  }
+  const subDirs = entries.filter(e => e.isDirectory()).length;
+  if (subDirs) {
+    warnings.push(`目录里还有 ${subDirs} 个子目录（未扫描）：如果图片在子目录里，请填更具体的那一层`);
+  }
+
+  return { ok: errors.length === 0, errors, warnings, images };
+}
+
 /** 读图并检查体积上限（超限的图上游会当 unsupported，提前拦下来给可读原因） */
-export async function loadImageInfo(p) {
-  const buf = await readFile(p);
+export async function loadImageInfo(p) {  const buf = await readFile(p);
   return { bytes: buf.length, tooBig: buf.length > MAX_IMAGE_BYTES };
 }
 

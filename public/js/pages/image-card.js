@@ -162,6 +162,28 @@ export async function renderImageCard(mount) {
     el('div', { class: 'hint', text: '第 1 张会同时作为角色卡头像（avatar）' }),
     dropZone, fileInput, listBox, summaryEl,
   );
+
+  /**
+   * 「从本机目录生成」。
+   *
+   * 为什么加这个：漫画一话常常是几十上百张图，一张张点选很麻烦
+   *（用户原话：「我翻文件找有点麻烦」）。这里直接填目录路径，
+   * 由**本机服务**去扫（浏览器拿不到目录列表）。
+   *
+   * 安全性：服务端只接受**回环地址**的请求，且只收图片扩展名。
+   */
+  const dirInput = el('input', {
+    type: 'text', id: 'image-card-dir', name: 'dirPath',
+    placeholder: 'D:\\漫画\\某作品\\第1话',
+  });
+  imageCard.appendChild(el('div', { style: { marginTop: '12px' } },
+    field({
+      label: '或：填一个本机图片目录（不用一张张选）',
+      control: dirInput,
+      id: 'image-card-dir', name: 'dirPath',
+      hint: '填绝对路径。会按文件名自然序读取该目录下的 png/jpg/webp/gif（最多 60 张），'
+        + '图片会复制一份进任务目录再分析。填了这里就不用上面的选图。',
+    })));
   page.appendChild(imageCard);
 
   // ============================================================
@@ -334,7 +356,12 @@ export async function renderImageCard(mount) {
 
   startBtn.addEventListener('click', async () => {
     const usable = picked.filter(p => p.ok);
-    if (!usable.length) { toast('请先选择至少 1 张可用图片', 'warn'); return; }
+    const dirPath = dirInput.value.trim();
+    // 目录模式和选图模式二选一：填了目录就不需要选图
+    if (!usable.length && !dirPath) {
+      toast('请先选择至少 1 张可用图片，或填一个本机图片目录', 'warn');
+      return;
+    }
     if (!baseUrlInput.value.trim() || !modelInput.value.trim()) {
       toast('请填写 Base URL 与模型名', 'warn');
       return;
@@ -347,6 +374,7 @@ export async function renderImageCard(mount) {
 
     const fd = new FormData();
     for (const p of usable) fd.append('images', p.file, p.file.name);
+    if (dirPath) fd.append('dirPath', dirPath);
     fd.append('baseUrl', state.config.baseUrl);
     fd.append('apiKey', state.config.apiKey);
     fd.append('model', state.config.model);

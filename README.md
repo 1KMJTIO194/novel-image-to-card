@@ -16,7 +16,7 @@
 | | |
 | --- | --- |
 | 界面结构 | 8 个页面（总览 / 生成流程 / 图片生成 / 任务与产物 / 角色卡内容 / 预设规则 / 命令参考 / 设置） |
-| 测试 | 35 个套件、2949 项断言，全部可离线跑（`npm test`） |
+| 测试 | 36 个套件、2974 项断言，全部可离线跑（`npm test`） |
 | 依赖 | Node.js ≥ 18，6 个运行时依赖 |
 
 ---
@@ -447,6 +447,8 @@ dsh/                   DeepSeek Harness 插件（复用 src/ 的核心，产物�
   lib/tasks.js         任务注册表（内存 + SSE 缓冲 + 取消）
   lib/multipart.js     自带的 multipart 解析器（宿主里没有 express/multer）
   cordis.patch.yml     bundle 挂载声明
+scripts/
+  image-card-from-dir.mjs  从本机目录直接生成角色卡（CLI；与网页版共用同一套扫描/流水线）
 tests/
   character-card.mjs   完整角色卡结构（chara_card_v3、initvar、EJS、正则）
   output-mode.mjs      输出模式（card / ab / both 的真实产物集合）
@@ -688,6 +690,43 @@ A 包的 `worldbook.json` 用的是同一个世界书名，同样会互相覆盖
 **绝不编造**：资料与画面都没有的设定不写。填一段「文字补充设定」能显著提升可用性。
 
 设置项 `wantWorldbook` 关掉时不生成世界书条目。
+
+### 从本机目录直接生成（不用一张张选图）
+
+漫画一话常常几十上百张，一张张点选不现实。所以有两个入口：
+
+**① 网页版**：「图片 → 卡」页的「① 选择图片」下面有一个
+**「或：填一个本机图片目录」** 输入框。填绝对路径（如
+`F:\漫画\某作品\第1话`），点生成即可，不用选图。
+
+**② 命令行**（适合批量/自动化）：
+
+```powershell
+$env:N2C_BASE_URL='https://api.deepseek.com/v1'
+$env:N2C_MODEL='deepseek-flash'
+$env:N2C_API_KEY='sk-...'          # 只从环境变量读，不写任何文件
+node scripts/image-card-from-dir.mjs "F:\漫画\某作品\第1话" --title "第1话"
+```
+
+先看不花钱的批次计划：
+
+```powershell
+node scripts/image-card-from-dir.mjs "F:\漫画\某作品\第1话" --dry-run
+```
+
+两者共用同一个扫描函数 `listImagesInDir`（`src/image_card.js`），所以规则一致：
+
+| 规则 | 说明 |
+| --- | --- |
+| 扩展名 | 只收 png / jpg / jpeg / webp / gif；txt、json、隐藏文件自动跳过 |
+| 页序 | **自然序**（`1,2,10` 而不是 `1,10,2`）—— 页序错了整本剧情就乱 |
+| 数量 | 沿用 60 张上限；超了会明确说"目录里 N 张，上限 60" |
+| 子目录 | 不递归扫描，但会提示"还有 N 个子目录" |
+| 产物独立性 | 图片会**复制进任务目录**，所以之后移动/删除原目录不影响产物复查 |
+
+**安全**：浏览器拿不到目录列表，所以这件事必须由本机服务做。既然服务要读任意目录，
+就必须自己把关：**只接受回环地址（127.0.0.1）发起的请求** —— 即使把 `HOST` 设成
+`0.0.0.0`，这个入口也只服务本机，不会变成"远程读盘"的口子。
 
 ### 最多 60 张，自动分批
 
@@ -1072,6 +1111,7 @@ npm run test:form      # 表单规范审计 + 模型选择器 + 模块图完整�
 | `tests/image-slice.mjs` | 70 | **超长截图切片**：切法几何（该切才切、无缝隙、无漏切、重叠防切断文字行）、切片→原图下标映射（含与 `imageOffset` 不叠加）、真实切图验证、sharp 缺失时优雅回落 |
 | `tests/image-card-fields.mjs` | 60 | **同图重复合并**（6 段合成 1 条、不同名不合并、跨图不合并）与**截图文字被用起来**（转录进世界书并去重、description 写出身份/关系、scenario 用文字而非画面、prompt 指令齐全） |
 | `tests/image-summary.mjs` | 87 | **信息→设定**：指涉图片的措辞被清洗、prompt 明令禁止"画面描述"与"剧情事件"、归一化容错、设定 YAML 不写「图片未提供」占位、装配后**没有剧情事件条目**、卡字段全部不含指涉图片的措辞、两个入口接线 |
+| `tests/image-card-dir.mjs` | 25 | **从本机目录生成**：只收图片扩展名、自然序（1,2,10 不乱序）、数量上限、空目录/坏路径可读报错；服务端**只接受回环请求**且把图复制进任务目录；前端输入框与 CLI 共用同一扫描函数 |
 | `tests/summary.mjs` | 66 | 变更总结：完善的前后差异、从零生成的产出清单、零变化时给原因、真实报告字段对齐、分类计数不可用时**不显示误导的 0** |
 | `tests/card-doctor.mjs` | 51 | 成卡体检与无损优化：空壳/同名/key 冲突/常驻预算；**只删无 keys 的空壳**，有 keys 的只报告；合并保留两边正文 |
 | `tests/augment-instruction.mjs` | 43 | **完善指令 + 已有卡世界观上下文**：摘要要读得懂（取正文值而不是复述条目名、YAML 键名不外泄、超限截断并说明）、指令段措辞（高优先级、不得违反事实）、以及 `runAugment` 四个步骤确实注入了上下文 |
@@ -1079,7 +1119,7 @@ npm run test:form      # 表单规范审计 + 模型选择器 + 模块图完整�
 | `tests/dsh-plugin.mjs` | 82 | DSH 插件：multipart 解析（二进制逐字节）、清单/补丁/图标/语言包约定、宿主导出形态、**客户端 bundle 在 vm + 假 React 里实际执行**、**main.key 必须等于 sidebar.panellist.id**、核心目录在四种安装形态下解析（含中文路径） |
 | `tests/dsh-plugin-e2e.mjs` | 78 | DSH 插件 HTTP 端到端：路由挂真服务器 + 假 LLM，跑完整「小说 → 角色卡」与「完善（带指令）」；含 SSE、产物下载、目录穿越拦截、取消；**信任栅栏**（跨站/跨源/非本机一律拒，路由逐条验证）；**打开产物目录**（越界目录必须 403） |
 
-合计 **2949 项断言 / 35 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
+合计 **2974 项断言 / 36 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
 找不到引擎时会打印跳过提示而不失败，可用 `EJS_PATH` 环境变量指向任意 ejs 副本。
 
 > `tests/output-mode.mjs`、`api-config.mjs`、`filename-encoding.mjs`、`e2e.mjs` 里有几条断言

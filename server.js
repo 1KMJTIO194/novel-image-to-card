@@ -26,7 +26,7 @@ import { validatePreset, previewStep, STEP_NAMES, STEP_LABELS } from './src/pres
 import * as S_STEPS from './src/steps.js';
 import {
   extractCharactersFromImages, buildCardFromExtraction,
-  writeImageCardOutputs, summarizeCard,
+  writeImageCardOutputs, summarizeCard, listImagesInDir,
   MAX_IMAGES, DEFAULT_VISION_BATCH, DEFAULT_VISION_CONCURRENCY,
 } from './src/image_card.js';
 import { extractCardSummary } from './src/image_summary.js';
@@ -946,6 +946,34 @@ app.post(
     const files = req.files?.images || [];
     const { baseUrl, apiKey, model, title, hint, wantWorldbook, preset: presetRaw, options } = req.body || {};
 
+    /**
+     * 「从本机目录生成」：直接填漫画/本子的一话目录，不用一张张选图。
+     *
+     * 为什么放在服务端：浏览器拿不到"目录列表"，只能让本机服务去读。
+     * 所以这里必须自己把关：
+     *   · **只允许来自回环地址的请求**（本机用户在页面上操作）。
+     *     HOST 允许被设成 0.0.0.0，但读了任意目录等于把整台机器的文件暴露出去，
+     *     所以即使 HOST=0.0.0.0，这个入口也只服务 127.0.0.1。
+     *   · 只接受图片扩展名，且沿用 MAX_IMAGES 上限。
+     */
+    const dirPathRaw = String(req.body?.dirPath || '').trim();
+    let dirImages = [];
+    if (dirPathRaw) {
+      const ip = req.socket?.remoteAddress || '';
+      const isLoopback = /^(::1|::ffff:127\.|127\.)/.test(ip);
+      if (!isLoopback) {
+        send('error', { message: '「从本机目录生成」只允许本机访问（远程请求请用上传图片）' });
+        return res.end();
+      }
+      const listed = await listImagesInDir(dirPathRaw);
+      for (const w of listed.warnings) send('progress', { step: 'WARN', msg: w, ts: Date.now() });
+      if (!listed.ok) {
+        send('error', { message: listed.errors.join('；') });
+        return res.end();
+      }
+      dirImages = listed.images;
+    }
+
     const taskId = `task_${Date.now()}`;
     const outDir = path.join(OUTPUT_DIR, taskId);
     const controller = new AbortController();
@@ -959,8 +987,8 @@ app.post(
     // 而头像要用原图、产物也要留一份原始输入便于复查
     let localImages = [];
     try {
-      if (!files.length) {
-        send('error', { message: '未上传图片（至少需要 1 张 png / jpg / webp / gif）' });
+      if (!files.length && !dirImages.length) {
+        send('error', { message: '未提供图片（上传图片，或填一个本机图片目录）' });
         return res.end();
       }
       if (!baseUrl || !model) {
@@ -994,6 +1022,20 @@ app.post(
         const dest = path.join(imgDir, `image_${String(i + 1).padStart(2, '0')}${ext}`);
         await copyFile(f.path, dest);
         localImages.push(dest);
+      }
+      // 从目录读的图也复制一份进任务目录 —— 产物要能独立复查，不能依赖用户原目录还在
+      for (const src of dirImages) {
+        const ext = path.extname(src).toLowerCase() || '.png';
+        const dest = path.join(imgDir, `image_${String(localImages.length + 1).padStart(2, '0')}${ext}`);
+        await copyFile(src, dest);
+        localImages.push(dest);
+      }
+      if (dirImages.length) {
+        send('progress', {
+          step: 'Init',
+          msg: `从目录读取 ${dirImages.length} 张：${dirPathRaw}`,
+          ts: Date.now(),
+        });
       }
 
       const finalTitle = String(title || '').trim() || '图片生成的角色卡';
