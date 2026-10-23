@@ -141,6 +141,8 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null);
       const [artifacts, setArtifacts] = useState([]);
       const [tasks, setTasks] = useState([]);
+      /** 本任务的产物目录（绝对路径），用于"打开目录 / 复制路径" */
+      const [outDir, setOutDir] = useState('');
 
       const esRef = useRef(null);
       const cardRef = useRef(null);
@@ -148,16 +150,61 @@ window.__ModuleLoader__.load({
       const novelRef = useRef(null);
       const logRef = useRef(null);
 
+      /**
+       * 写一行日志。
+       *
+       * 放在最前面（而不是紧挨着使用处）：`openFolder` / `copyPath` 的
+       * `useCallback` 依赖数组会**立即求值** `pushLog`，声明在后会踩 TDZ
+       *（ReferenceError: Cannot access 'pushLog' before initialization）。
+       */
+      const pushLog = (line) => setLogs(prev => [...prev.slice(-300), line]);
+
       // 结束时拉产物
       const loadArtifacts = useCallback(async (id) => {
         try {
           const r = await fetch(`${API}/task?id=${encodeURIComponent(id)}`);
           const j = await r.json();
           setArtifacts(j.artifacts || []);
+          if (j.outDir) setOutDir(j.outDir);
           if (j.status) setStatus(j.status);
           if (j.error) setError(j.error);
         } catch (_) { /* 忽略 */ }
       }, []);
+
+      /**
+       * 在系统文件管理器里打开产物目录。
+       *
+       * 为什么要做：用户反馈「dsh 上生成的角色卡都保存在了哪里，我翻文件找有点麻烦」——
+       * 插件的数据目录在 `~/.dsh/novel2card/output/task_<时间戳>/` 下，
+       * 每层都带时间戳，手动找确实难受。这个按钮直接把它打开。
+       */
+      const openFolder = useCallback(async () => {
+        if (!taskId) return;
+        try {
+          const r = await fetch(`${API}/reveal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taskId }),
+          });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+          pushLog(`已在文件管理器中打开：${j.outDir || outDir}`);
+        } catch (e) {
+          // 打不开不是致命错误：路径仍然显示在面板上，可以复制
+          pushLog(`打开目录失败（可直接复制路径）：${e.message}`);
+        }
+      }, [taskId, outDir, pushLog]);
+
+      /** 复制产物目录路径到剪贴板 */
+      const copyPath = useCallback(async () => {
+        if (!outDir) return;
+        try {
+          await navigator.clipboard.writeText(outDir);
+          pushLog(`已复制路径：${outDir}`);
+        } catch {
+          pushLog(`复制失败，请手动选择：${outDir}`);
+        }
+      }, [outDir, pushLog]);
 
       useEffect(() => {
         // 记住上次填的接口配置，省得每次重输
@@ -180,8 +227,6 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
       }, [logs]);
-
-      const pushLog = (line) => setLogs(prev => [...prev.slice(-300), line]);
 
       const openStream = useCallback((id) => {
         const es = new EventSource(`${API}/stream?id=${encodeURIComponent(id)}`);
@@ -364,7 +409,26 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'n2c-row' },
                   h('span', { className: 'n2c-hint' }, `${(a.size / 1024).toFixed(1)} KB`),
                   dl));
-            }))
+            }),
+            // 产物目录：直接给出绝对路径 + 打开 / 复制（省得去翻文件夹）
+            outDir
+              ? h('div', { className: 'n2c-col', style: { marginTop: 8, gap: 4 } },
+                h('div', { className: 'n2c-label' }, '产物目录'),
+                h('div', {
+                  className: 'n2c-hint',
+                  style: {
+                    fontFamily: 'ui-monospace,Consolas,monospace',
+                    fontSize: 11, wordBreak: 'break-all', userSelect: 'all',
+                  },
+                }, outDir),
+                h('div', { className: 'n2c-row', style: { gap: 6, flexWrap: 'wrap' } },
+                  h('button', {
+                    type: 'button', className: 'n2c-btn', onClick: openFolder,
+                  }, '📂 打开目录'),
+                  h('button', {
+                    type: 'button', className: 'n2c-btn', onClick: copyPath,
+                  }, '复制路径')))
+              : null)
           : null,
         // 历史任务
         tasks.length > 1

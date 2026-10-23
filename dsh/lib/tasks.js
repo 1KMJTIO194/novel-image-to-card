@@ -219,9 +219,66 @@ export async function startImageCard(job, {
     throw new Error(`模型 ${model} 没有给出可用的视觉分析（${vision.quality?.detail || '未识别出角色'}）。`
       + '请换用支持视觉的模型。');
   }
+
+  /**
+   * 把图片内容当"原文"抽剧情。
+   *
+   * ⚠️ 这一段**必须**和本地 Web 版（server.js）保持一致。
+   * 踩过的坑：最初只把它接进了 server.js，忘了插件这条路 ——
+   * 结果同一个插件生成的卡仍然是"只有外貌 + 一个开场占位"，
+   * 而用户看到的正是插件里的结果（vision.json 里已经有 transcript 了，
+   * 说明新 prompt 生效了，但剧情抽取压根没跑）。
+   *
+   * 抽不出（纯立绘）返回 null，装配段会回退到旧行为。
+   */
+  let narrative = null;
+  try {
+    const [{ extractNarrativeFromImages, hasNarrativeSource }, { makeLLM }] = await Promise.all([
+      importCore('image_narrative.js'),
+      importCore('llm.js'),
+    ]);
+    emit('progress', { step: 'Narrative', msg: '把图片内容当原文抽取剧情…', ts: Date.now() });
+    const narrativeLlm = makeLLM({
+      baseUrl: String(baseUrl || '').replace(/\/+$/, ''),
+      apiKey, model,
+    }, preset || null);
+    narrative = await extractNarrativeFromImages({
+      llm: narrativeLlm,
+      profiles: vision.profiles,
+      imageCount: imagePaths.length,
+      concurrency: Number(concurrency) || 3,
+      send: (ev) => emit(ev.step || 'Narrative', ev.msg, ev),
+    });
+    if (narrative) {
+      emit('progress', {
+        step: 'Narrative',
+        msg: `图片内容抽取完成：${narrative.events.length} 事件 · `
+          + `${narrative.phases.length} 阶段 · ${narrative.worldbookItems.length} 世界观 · `
+          + `${narrative.characters.length} 人物`,
+        ts: Date.now(),
+      });
+    } else if (hasNarrativeSource(vision.profiles)) {
+      emit('progress', { step: 'WARN', msg: '图片里有文字但没能抽出剧情，只按画面生成', ts: Date.now() });
+    } else {
+      emit('progress', {
+        step: 'Narrative',
+        msg: '图片里没有可读文字（纯立绘/画面），只按画面生成人物档案',
+        ts: Date.now(),
+      });
+    }
+  } catch (e) {
+    // 叙事抽取失败不能让整个任务挂掉 —— 回退到"只有外貌"仍然能出一张卡
+    emit('progress', {
+      step: 'WARN',
+      msg: `从图片内容抽取剧情失败，将只按画面生成人物档案：${e.message}`,
+      ts: Date.now(),
+    });
+  }
+
   const result = await buildCardFromExtraction({
     profiles: vision.profiles,
     title,
+    narrative,
     wantWorldbook: wantWorldbook !== false,
   });
   const sum = summarizeCard(result);

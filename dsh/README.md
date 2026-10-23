@@ -194,6 +194,7 @@ NOVEL2CARD_TRUSTED_HOSTS=card.example.com,192.168.1.9:19387
 | GET | `/novel2card/task?id=` | 任务状态 + 产物清单 |
 | GET | `/novel2card/stream?id=` | **SSE 事件流**（start / progress / files / done） |
 | GET | `/novel2card/file?id=&name=` | 下载单个产物（限定在任务目录内，防目录穿越） |
+| POST | `/novel2card/reveal` | 在系统文件管理器里打开产物目录（目录只能来自任务记录） |
 | POST | `/novel2card/cancel` | 协作式取消 |
 | POST | `/novel2card/remove` | 删除任务记录与产物 |
 
@@ -202,18 +203,39 @@ SSE 之所以可行：`dsh-host-webserver` 的 gzip 过滤器**显式豁免 `tex
 
 ---
 
-## 数据放在哪
+## 数据放在哪（不用再翻文件夹）
 
 ```
 $DSH_HOME/novel2card/
 └── output/
     └── task_<时间戳>/          ← 与本地 Web 版同样的产物结构
-        ├── character_card.json
+        ├── character_card.json   ← 角色卡本体，导入 SillyTavern 用这个
         ├── worldbook.json / preset_fragment.json
+        ├── characters.json / vision.json
         ├── summary.json / SUMMARY.md
         ├── meta.json / README.md
         └── ...
 ```
+
+本机 `$DSH_HOME` 是 `C:\Users\<你>\.dsh`，所以完整路径形如：
+
+```
+C:\Users\六六六\.dsh\novel2card\output\task_1792745208244\character_card.json
+```
+
+**面板里不用翻**：跑完之后「产物」区会显示：
+
+- 每个产物的文件大小，`character_card.json` 带**「下载」**按钮
+- **产物目录的绝对路径**（可选中复制）
+- **「📂 打开目录」** 按钮 —— 直接在系统文件管理器里打开这个任务目录
+- **「复制路径」** 按钮
+
+> 为什么加这个：每层目录都带时间戳，手动找确实麻烦。用户反馈过
+> 「我翻文件找有点麻烦」，所以给了这两条捷径。
+
+`/novel2card/reveal` 这条路由的安全要点：**不接受任意路径** ——
+目录只能来自服务端自己的任务记录，且必须落在插件数据根之下，
+否则就成了「让宿主打开任意目录」的洞。这条有测试钉住（越界目录返回 403）。
 
 上传的小说/图片落在系统临时目录（`os.tmpdir()/novel2card-uploads`），插件卸载时清理。
 **任务表在内存里**：插件重载后列表会清空，但产物仍在磁盘上。

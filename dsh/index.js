@@ -11,6 +11,7 @@
  */
 import { tmpdir } from 'node:os';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -305,6 +306,59 @@ export function apply(ctx) {
       outDir: job.outDir,
       artifacts: await listArtifacts(job.outDir),
     });
+  });
+
+  /**
+   * 在系统文件管理器里打开产物目录。
+   *
+   * 用户反馈：插件的数据目录在 `~/.dsh/novel2card/output/task_<时间戳>/`，
+   * 手动翻文件很麻烦。这个路由让面板上的「打开目录」按钮直接把它打开。
+   *
+   * ⚠️ 安全：**不接受任意路径**。目录只能来自服务端自己的任务记录
+   *（`job.outDir`），并且必须落在插件自己的数据根之下 —— 否则这个接口
+   * 就变成一个"让宿主帮任意调用者打开任意目录"的洞。
+   * 写操作（POST）+ 信任栅栏已在 `route` 里统一覆盖。
+   */
+  route('exact', '/novel2card/reveal', async (req, res) => {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: '只支持 POST' });
+    let body = {};
+    try {
+      const raw = await readBody(req, 64 * 1024);
+      body = raw?.length ? JSON.parse(raw.toString('utf8')) : {};
+    } catch (e) {
+      return sendJson(res, 400, { error: `请求体不是合法 JSON：${e.message}` });
+    }
+    const job = body?.taskId ? getJob(String(body.taskId)) : null;
+    if (!job) return sendJson(res, 404, { error: '任务不存在（插件重载后内存任务会丢失，但产物仍在磁盘上）' });
+
+    const outDir = path.resolve(job.outDir);
+    const root = path.resolve(baseDir);
+    // 目录必须真的在插件数据根之下（防路径穿越 / 防被改造成打开任意目录）
+    if (outDir !== root && !outDir.startsWith(root + path.sep)) {
+      return sendJson(res, 403, { error: '产物目录不在插件数据目录内，已拒绝打开' });
+    }
+    if (!existsSync(outDir)) {
+      return sendJson(res, 404, { error: `目录不存在：${outDir}` });
+    }
+
+    /** 各平台打开目录的命令（detached，不阻塞请求） */
+    const cmd = process.platform === 'win32' ? 'explorer.exe'
+      : process.platform === 'darwin' ? 'open'
+        : 'xdg-open';
+    try {
+      const { spawn } = await import('node:child_process');
+      const child = spawn(cmd, [outDir], { detached: true, stdio: 'ignore' });
+      // Explorer 在新窗口打开后可能不退出，不 unref 会拖住宿主进程
+      child.unref();
+      // explorer.exe 即使成功也常返回非 0，所以不 await 它的退出码
+      child.on('error', () => { /* 交给下面返回的提示 */ });
+    } catch (e) {
+      return sendJson(res, 500, {
+        error: `无法调用 ${cmd}（${e.message}）：可直接复制面板上显示的路径`,
+        outDir,
+      });
+    }
+    sendJson(res, 200, { ok: true, outDir, opened: cmd });
   });
 
   // 5) 事件流（SSE）

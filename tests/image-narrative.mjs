@@ -235,15 +235,34 @@ console.log('\n【5】人物合并：文字身份 + 画面外貌都要保住');
 }
 
 // ============================================================
-console.log('\n【6】接线：server 真的调用了叙事抽取');
+console.log('\n【6】接线：两条入口都必须调用叙事抽取');
 {
+  /**
+   * 这个功能有**两个入口**：本地 Web 版（server.js）与 DSH 插件（dsh/lib/tasks.js）。
+   *
+   * 踩过的坑：最初只接进了 server.js，忘了插件那条 ——
+   * 于是插件生成的卡仍然只有"外貌 + 一个开场占位"，
+   * 而用户看到的正是插件里的结果。
+   * 所以这里对**两个入口**分别断言。
+   */
   const srv = await readFile(path.join(ROOT, 'server.js'), 'utf-8');
-  ok('import 了 extractNarrativeFromImages', /import \{ extractNarrativeFromImages/.test(srv), '');
-  ok('在装配前调用', srv.indexOf('extractNarrativeFromImages({') < srv.indexOf('buildCardFromExtraction({\n        profiles: vision.profiles'), '');
-  ok('把 narrative 传给装配段', /narrative,/.test(srv), '');
-  ok('抽取失败不中断任务（有 catch 回退）', /抽取剧情失败，将只按画面生成人物档案/.test(srv), '');
-  ok('没有原文时说明会回退', /没有可读文字/.test(srv), '');
-  ok('buildCardFromExtraction 支持 narrative 参数', /cfg\.narrative/.test(await readFile(path.join(ROOT, 'src/image_card.js'), 'utf-8')), '');
+  const plug = await readFile(path.join(ROOT, 'dsh/lib/tasks.js'), 'utf-8');
+  const core = await readFile(path.join(ROOT, 'src/image_card.js'), 'utf-8');
+
+  ok('Web 版 import 了 extractNarrativeFromImages', /import \{ extractNarrativeFromImages/.test(srv), '');
+  ok('Web 版在装配前调用', srv.indexOf('extractNarrativeFromImages({') < srv.indexOf('buildCardFromExtraction({\n        profiles: vision.profiles'), '');
+  ok('Web 版把 narrative 传给装配段', /narrative,/.test(srv), '');
+  ok('Web 版抽取失败不中断任务', /抽取剧情失败，将只按画面生成人物档案/.test(srv), '');
+  ok('Web 版没有原文时说明会回退', /没有可读文字/.test(srv), '');
+
+  // ---- DSH 插件入口（曾经漏掉的那条）----
+  ok('插件 importCore 了 image_narrative.js', /importCore\('image_narrative\.js'\)/.test(plug), '');
+  ok('插件在装配前调用叙事抽取', plug.indexOf('extractNarrativeFromImages({') > 0
+    && plug.indexOf('extractNarrativeFromImages({') < plug.indexOf('buildCardFromExtraction({'), '');
+  ok('插件把 narrative 传给装配段', /narrative,/.test(plug), '');
+  ok('插件抽取失败不中断任务', /抽取剧情失败，将只按画面生成人物档案/.test(plug), '');
+  ok('插件用 makeLLM 建独立的 LLM（不复用视觉那次调用）', /makeLLM\(\{/.test(plug), '');
+  ok('装配段支持 narrative 参数', /cfg\.narrative/.test(core), '');
 }
 
 console.log(`\n${'='.repeat(46)}`);

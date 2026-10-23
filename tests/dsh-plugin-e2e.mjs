@@ -573,6 +573,73 @@ console.log('\n【7】信任栅栏：非本机 / 跨站请求必须被拒');
 }
 
 // ============================================================
+console.log('\n【8】打开产物目录（省得用户翻文件夹）');
+{
+  /**
+   * 用户反馈：「dsh 上生成的角色卡都保存在了哪里，我翻文件找有点麻烦」。
+   *
+   * 插件数据目录是 `~/.dsh/novel2card/output/task_<时间戳>/`，
+   * 手动翻确实麻烦，所以面板上给了「打开目录 / 复制路径」。
+   *
+   * ⚠️ 这个接口的安全要点：**不接受任意路径**，目录只能来自服务端任务记录，
+   * 且必须落在插件数据根之下 —— 否则就成了"让宿主打开任意目录"的洞。
+   */
+  const Tasks = await import(pathToFileURL(path.join(ROOT, 'dsh/lib/tasks.js')).href);
+  const dataRoot = path.join(tmpRoot, 'novel2card');
+
+  const post = (body) => fetch(`${BASE}/novel2card/reveal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  // 建一个合法任务（outDir 在数据根之下）
+  const job = await Tasks.createJob({ kind: 'generate', title: '打开目录测试', baseDir: dataRoot });
+  const okRes = await post({ taskId: job.taskId });
+  const okJson = await okRes.json();
+  ok('合法任务 → 200', okRes.status === 200, `${okRes.status} ${JSON.stringify(okJson).slice(0, 120)}`);
+  ok('返回产物目录路径', typeof okJson.outDir === 'string' && okJson.outDir.includes(job.taskId),
+    String(okJson.outDir));
+  ok('返回告知用哪个命令打开', typeof okJson.opened === 'string' && okJson.opened.length > 0,
+    String(okJson.opened));
+
+  // 未知任务
+  const nf = await post({ taskId: 'task_does_not_exist' });
+  ok('未知任务 → 404', nf.status === 404, String(nf.status));
+
+  // 非 POST
+  const getRes = await fetch(`${BASE}/novel2card/reveal`);
+  ok('GET → 405', getRes.status === 405, String(getRes.status));
+
+  // 路径穿越 / 数据根之外的任务必须被拒
+  const outside = await Tasks.createJob({
+    kind: 'generate', title: '越界测试', baseDir: path.join(tmpRoot, '..', 'n2c-outside'),
+  });
+  const forb = await post({ taskId: outside.taskId });
+  const forbJson = await forb.json();
+  ok('产物目录在数据根之外 → 403（防打开任意目录）', forb.status === 403,
+    `${forb.status} ${JSON.stringify(forbJson).slice(0, 120)}`);
+  ok('拒绝时说明原因', /不在插件数据目录内/.test(forbJson.error || ''), String(forbJson.error));
+
+  // 非法 JSON
+  const badJson = await fetch(`${BASE}/novel2card/reveal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{not json',
+  });
+  ok('非法 JSON → 400', badJson.status === 400, String(badJson.status));
+
+  // 这个写接口同样受信任栅栏保护
+  // （`rawGet` 是【7】块内的局部函数，这里内联一个，避免跨块依赖）
+  const remoteStatus = await new Promise((resolve) => {
+    const r = http.request({
+      host: '127.0.0.1', port: SRV_PORT, path: '/novel2card/reveal', method: 'POST',
+      headers: { Host: '192.168.1.50:3222', 'Content-Type': 'application/json', 'Content-Length': 2 },
+    }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    r.on('error', () => resolve(0));
+    r.write('{}');
+    r.end();
+  });
+  ok('非本机请求 → 403（与其他写接口一致）', remoteStatus === 403, String(remoteStatus));
+}
+
+// ============================================================
 // 收尾
 await new Promise(r => server.close(r));
 await new Promise(r => mockLLM.close(r));
