@@ -85,7 +85,25 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.static(PUBLIC_DIR, { extensions: ['html'] }));
+/**
+ * 静态资源：HTML / JS 一律 **no-store**。
+ *
+ * 为什么：这是个本地工具，代码随时会被改。浏览器把 `js/pages/*.js` 缓存住之后，
+ * 会出现「**页面是旧的、后端是新的**」的错配 —— 用户点了新功能，
+ * 前端却按旧逻辑把请求拦下（或只发旧字段），表现为"点了没反应/生成失败"，
+ * 而且**没有任何报错能指向真正原因**。我自己排查时就撞了一次：
+ * 用户以为重启过，实际浏览器还在跑旧 JS。
+ *
+ * 关掉缓存对这个工具没有代价（文件都在本机、只有几十 KB）。
+ */
+app.use(express.static(PUBLIC_DIR, {
+  extensions: ['html'],
+  setHeaders: (res, filePath) => {
+    if (/\.(html|js|mjs|css)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    }
+  },
+}));
 
 // ============================================================
 // 任务持久化辅助

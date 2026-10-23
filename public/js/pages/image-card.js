@@ -164,6 +164,37 @@ export async function renderImageCard(mount) {
   );
 
   /**
+   * 「选文件夹」——直接选一话的目录，一次把这几十张图加进来。
+   *
+   * 相比让用户一张张点选，这是**最省事**的路径；
+   * 而且它走的是普通文件上传（`webkitdirectory` 是浏览器能力），
+   * 不需要服务端去读盘 —— 所以换到任何机器/部署都能用。
+   * 只把这一层目录下的图片加进来（子目录不递归，和 CLI 规则一致）。
+   */
+  const folderInput = el('input', {
+    type: 'file', id: 'image-card-folder', name: 'imageFolder',
+    webkitdirectory: true, directory: true, multiple: true,
+    style: { display: 'none' },
+  });
+  folderInput.addEventListener('change', () => {
+    const all = [...folderInput.files];
+    // webkitdirectory 会给目录下所有文件（含子目录），这里只留图片，避免一堆 txt 报"格式不支持"
+    const imgs = all.filter(f => OK_EXT.includes(extOf(f.name)));
+    const skipped = all.length - imgs.length;
+    if (imgs.length) addFiles(imgs);
+    if (skipped > 0) toast(`已忽略 ${skipped} 个非图片文件（只收 ${OK_EXT.join(' / ')}）`, 'info');
+    else if (!imgs.length) toast('这个文件夹里没有图片', 'warn');
+    folderInput.value = '';
+  });
+  imageCard.appendChild(el('div', { class: 'row', style: { marginTop: '8px' } },
+    el('button', {
+      class: 'btn', type: 'button',
+      text: '📁 选一个文件夹（整话一次导入）',
+      onclick: () => folderInput.click(),
+    }),
+    folderInput));
+
+  /**
    * 「从本机目录生成」。
    *
    * 为什么加这个：漫画一话常常是几十上百张图，一张张点选很麻烦
@@ -344,7 +375,19 @@ export async function renderImageCard(mount) {
     const lines = (run.events || [])
       .filter(e => e.event === 'progress' || e.event === 'error')
       .map(e => {
-        if (e.event === 'error') return `❌ ${e.data?.message || ''}`;
+        if (e.event === 'error') {
+          const msg = String(e.data?.message || '');
+          /**
+           * 旧版服务端不认识目录参数：它只看到"没有上传文件"，
+           * 于是返回「未上传图片…」。这时真正的病根是**后端没重启**，
+           * 但用户看到的却是"我明明填了目录" —— 所以在这里点破，
+           * 不然只能盲猜。
+           */
+          if (dirInput.value.trim() && /未上传图片/.test(msg)) {
+            return `❌ ${msg}\n   ↳ 服务端仍是旧代码（不认识目录参数）：请关掉正在运行的服务窗口，重新 npm start 后再试`;
+          }
+          return `❌ ${msg}`;
+        }
         const step = e.data?.step || '';
         const warn = step === 'WARN' ? '⚠ ' : '';
         return `[${step}] ${warn}${e.data?.msg || ''}`;
