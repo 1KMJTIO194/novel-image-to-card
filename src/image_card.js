@@ -30,6 +30,9 @@ import { generateStatusbar, THEMES } from './step75_statusbar.js';
 import { summarizeGenerate, renderSummaryMarkdown } from './summary.js';
 import { sliceAllForVision } from './image_slice.js';
 import {
+  renderSettingsYaml, worldbookFromSummary, cardFieldsFromSummary, openerFromSummary,
+} from './image_summary.js';
+import {
   assembleCharacterCard, assembleWorldbook, buildVariables, initializeUserNamespace,
   inspectContentYaml, isPlaceholderBody, makeStatusbarPreview, groupByStoryline,
 } from './pipeline.js';
@@ -956,68 +959,45 @@ export function renderWorldbookFromProfiles(profiles = [], { title = '' } = {}) 
 }
 
 /**
- * 图片内容的时间线。
+ * 把「总结出来的人物设定」与「画面事实」配对。
  *
- * **不像小说路径那样调用 `solveTimeline`**：那个函数是给有章节号与明确日期
- * 的长篇小说用的，它会挑一个日期锚点、按相对/模糊/周期分类、推出世界日期。
- * 截图转录里通常只有"10小时前""26年10月11日"这类社交平台时间戳，
- * 拿它们当世界日期会造出一套**看似精确其实错误**的时间体系。
- *
- * 所以这里如实标注"时间信息来自图片，未做日期推断"，事件仍按抽取顺序排列。
- */
-export function buildImageTimeline(events = []) {
-  const first = events[0]?.name || '';
-  return {
-    base: '相对纪元',
-    origin: {
-      raw: '',
-      event: first,
-      reason: '图片内容未提供可用的时间锚点，以首个事件为起点',
-    },
-    events: events.map(e => ({
-      name: e.name,
-      // 事件自带的时间文本（模型从转录里读到的，如"10小时前"）原样保留
-      time: e.time || '',
-      chapter: e.chapter || '',
-      pressure: e.pressure || 'normal',
-      dateKey: null,
-    })),
-    characters: [],
-    worldDate: null,
-    history: [],
-    relativeStats: { relative: 0, vague: 0, periodic: 0 },
-    fromEvents: true,
-    /** 标记：时间线未做日期推断，下游不要当成确切日期用 */
-    approximate: true,
-  };
-}
-
-/**
- * 合并"文字抽出来的人物"与"画面认出来的人物"。
- *
- * 文字给出身份、经历、关系（`nar.characters` 的 profile）；
- * 画面给出外貌、服饰、体型（`profiles`）。两边都要，缺一边卡就不完整。
+ * 总结给出身份、性格、关系（来自信息）；
+ * 画面给出外貌、服饰、体型（来自画面上看得见的）。
+ * 两边都要，缺一边卡就不完整。
  *
  * 配对靠**名字模糊匹配**（归一化后互为子串，或命中对方的别名/文字称呼）。
  * 配不上的两边都保留：
- *   · 只在文字里出现的（例如"室友"没露脸）→ 仍然成条，外貌写"图片未提供"
- *   · 只在画面里出现的（例如正文没提到的路人）→ 用视觉档案成条
+ *   · 只在总结里出现的（例如"室友"没露脸）→ 仍然成条，外貌字段留空
+ *   · 只在画面里出现的（例如资料没提到的路人）→ 用画面事实成条
  * 宁可多一条，也不要因为匹配不上就丢人。
  *
- * @param {Array} narChars `nar.characters`：`{name, aliases, profile}`
+ * @param {Array} summaryChars `summary.characters`（归一化后的设定）
+ * @param {Array} profiles 视觉档案
  * @param {Array} profiles 视觉档案
  * @param {string} protagonistName
  */
-export function mergeNarrativeCharacters(narChars = [], profiles = [], protagonistName = '') {
+/**
+ * 把「总结出来的人物设定」与「画面事实」配对。
+ *
+ * 总结给出身份/性格/关系（信息），画面给出外貌/服饰（事实）。两者都要。
+ * 配对靠名字模糊匹配（含别名与文字里的称呼）；配不上的两边都保留 ——
+ * 宁可多一条，也不要因为匹配不上把人弄丢。
+ *
+ * 与已被取代的 `mergeNarrativeCharacters` 的区别：这里渲染的是**设定** YAML *（`renderSettingsYaml`），不再写「图片未提供」「据画面推断」那套看图措辞。
+ *
+ * @param {Array} summaryChars 归一化后的 summary.characters
+ * @param {Array} profiles 视觉档案
+ * @param {string} protagonistName
+ */
+export function mergeSummaryCharacters(summaryChars = [], profiles = [], protagonistName = '') {
   const usedProfiles = new Set();
 
-  /** 名字归一化：去空格、大小写、常见后缀与「（图N）」 */
+  /** 名字归一化：去「（图N）」、空白、标点、大小写 */
   const norm = (s) => String(s || '')
     .replace(/[（(]\s*图\s*\d+\s*[)）]/g, '')
-    .replace(/[\s·・.、,，。!！?？"'"'']+/g, '')
+    .replace(/[\s·・.、,，。!！?？"'“”‘’]+/g, '')
     .toLowerCase();
 
-  /** 找一个视觉档案与这个文字人物对应 */
   const findProfile = (name, aliases = []) => {
     const cands = [name, ...aliases].map(norm).filter(Boolean);
     if (!cands.length) return -1;
@@ -1035,7 +1015,7 @@ export function mergeNarrativeCharacters(narChars = [], profiles = [], protagoni
   };
 
   const out = [];
-  for (const [idx, c] of narChars.entries()) {
+  for (const [idx, c] of summaryChars.entries()) {
     const name = String(c?.name || '').trim();
     if (!name) continue;
     const aliases = Array.isArray(c?.aliases) ? c.aliases.filter(Boolean) : [];
@@ -1043,43 +1023,31 @@ export function mergeNarrativeCharacters(narChars = [], profiles = [], protagoni
     const p = pi >= 0 ? profiles[pi] : null;
     if (pi >= 0) usedProfiles.add(pi);
 
-    // 文字侧的内容（profile 可能是 {content_yaml} 或原始对象）
-    const rawProfile = c?.profile ?? {};
-    const contentYaml = String(
-      rawProfile.content_yaml ?? rawProfile.content ?? rawProfile.text ?? rawProfile.yaml ?? '',
-    ).trim();
-
     out.push({
       name,
-      /**
-       * 分层：文字抽出来的第一个人视为主角。
-       *
-       * 图片路径没有"出场章节数"这个概念，所以不套小说路径的剧情占比分层
-       *（那会得到一堆"100%"的无意义分层）。
-       */
+      /** 图片路径没有"出场章节数"，不套小说的剧情占比分层 */
       tier: idx === 0 || name === protagonistName ? '主角' : '主要NPC',
       role: idx === 0 ? '主角' : '主要NPC',
-      // 文字档案为主；没有就退回视觉档案的 YAML
-      content_yaml: contentYaml || (p ? renderContentYaml(p, { protagonistName }) : ''),
+      // 设定 YAML：外貌缺失时用画面事实补
+      content_yaml: renderSettingsYaml(c, p),
       aliases: [...new Set([...aliases, ...((p?.aliases) || [])])],
-      // 画面侧的溯源信息（有就带上）
       ...(p ? { imageIndex: p.imageIndex, confidence: p.confidence } : {}),
-      fromNarrative: true,
+      fromSummary: true,
     });
   }
 
-  // 只在画面里出现、文字里没提到的人物：不能丢
+  // 只在画面里出现、总结里没提到的人物：不能丢（用画面事实写设定）
   for (const [i, p] of profiles.entries()) {
     if (usedProfiles.has(i)) continue;
     out.push({
       name: p.name,
       tier: out.length === 0 ? '主角' : '主要NPC',
       role: out.length === 0 ? '主角' : '主要NPC',
-      content_yaml: renderContentYaml(p, { protagonistName }),
+      content_yaml: renderSettingsYaml({ name: p.name, aliases: p.aliases }, p),
       aliases: p.aliases || [],
       imageIndex: p.imageIndex,
       confidence: p.confidence,
-      /** 标记：这条只有画面信息，文字里没出现 */
+      /** 标记：这条只有画面事实，总结里没提到 */
       visualOnly: true,
     });
   }
@@ -1106,24 +1074,26 @@ export async function buildCardFromExtraction(cfg = {}) {
   const protagonistName = String(cfg.userMode?.protagonistName || profiles[0]?.name || '').trim();
 
   /**
-   * 叙事抽取结果（把图片内容当"原文"抽出来的剧情结构）。
+   * 信息总结（把图片里的信息归纳成**设定**）。
    *
-   * 这是图片路径的**主路径**：有它的时候，事件 / 故事线 / 阶段 / 世界观
-   * 都来自真正的剧情抽取，而不是"与XX相遇"的占位。
-   * 没有它（纯立绘、没有可读文字）才回退到旧的"只有外貌"模式。
+   * 这是图片路径的正路（用户澄清后确定的）：
+   *   「通过图片生成角色卡应该是**总结图片里的内容信息**生成角色卡，
+   *     而不是**图片里面怎么怎么样**，**图片里发生了什么剧情**等」
+   *
+   * 有 summary 时：人物 / 世界观 / 描述 / 开场全部来自**总结后的设定**，
+   * 并且**不抽剧情事件**（只造一个开场处境，给状态栏与变量树当落点）。
+   * 没有时（总结调用失败）才回退到"只有画面事实"的旧模式。
    */
-  const nar = cfg.narrative && typeof cfg.narrative === 'object' ? cfg.narrative : null;
-  const useNarrative = !!nar && Array.isArray(nar.events) && nar.events.length > 0;
+  const summary = cfg.summary && typeof cfg.summary === 'object' ? cfg.summary : null;
+  const useSummary = !!summary && Array.isArray(summary.characters) && summary.characters.length > 0;
 
   // ---------- 1. 人物条目 ----------
   /**
-   * 两条信息源合一：
-   *   · 叙事抽取（`extractNarrativeFromImages`）给出**身份 / 经历 / 关系**（来自文字）
-   *   · 视觉档案（`profiles`）给出**外貌 / 服饰 / 体型**（来自画面）
-   * 文字里有、画面里没有的（身份），与画面里有、文字里没有的（外貌）都要保住。
+   * 有总结时：人物设定来自 summary，外貌缺失则用画面事实补
+   *（画面事实是"看得见的"，不是"这是张图片"）。
    */
-  const characters = useNarrative && Array.isArray(nar.characters) && nar.characters.length
-    ? mergeNarrativeCharacters(nar.characters, profiles, protagonistName)
+  const characters = useSummary
+    ? mergeSummaryCharacters(summary.characters, profiles, protagonistName)
     : profiles.map((p, i) => ({
       name: p.name,
       tier: i === 0 || p.name === protagonistName ? '主角' : '主要NPC',
@@ -1140,70 +1110,80 @@ export async function buildCardFromExtraction(cfg = {}) {
   let timeline;
   let phasesWithDeltas;
 
-  if (useNarrative) {
-    /**
-     * **主路径**：事件、故事线、阶段都来自把图片内容当"原文"的抽取
-     *（`extractNarrativeFromImages` 复用小说路径的 STEP prompt）。
-     *
-     * 与小说路径的区别只在"时间"：`solveTimeline` 是给有章节与日期信息的
-     * 长篇小说用的，截图转录里通常没有稳定日期，硬套会造出一堆假的日期锚点。
-     * 所以这里保留抽取到的事件与故事线，时间线则**如实标注"未提供时间信息"**。
-     */
-    events = nar.events;
-    storylines = nar.storylines && Object.keys(nar.storylines).length
-      ? nar.storylines
-      : groupByStoryline(events);
-    phasesWithDeltas = Array.isArray(nar.phases) && nar.phases.length
-      ? nar.phases
-      : [{
-        name: '开场',
-        startEvent: events[0]?.name || '',
-        endEvent: events[events.length - 1]?.name || '',
-        text: '图片内容的时间线未提供，以首个事件为起点。',
-        characterDeltas: [],
-      }];
-    timeline = buildImageTimeline(events);
-  } else {
-    /**
-     * **回退路径**：纯立绘 / 没有可读文字时，抽不出剧情。
-     *
-     * 造一个"与这些角色相遇"的开场占位，让导演指令与状态栏有落点，
-     * 而不是让 AI 在空事件表上猜。这是原来唯一的行为，现在只在没有原文时使用。
-     */
-    const firstChar = characters[0]?.name || '角色';
-    const openerName = `与${firstChar}相遇`;
+  /**
+   * **不抽剧情。**
+   *
+   * 用户明确说过：不要「图片里发生了什么剧情」。所以图片路径**不产出**事件列表 /
+   * 故事线 / 阶段划分 —— 那些是小说路径的产物（长篇小说有章节与推进）。
+   * 图片给的是**信息**，归纳成设定就够了；剧情留给用户自己玩。
+   *
+   * 但状态栏 / 导演指令 / 变量树需要一个落点，所以只造**一个**「开场」：
+   * 内容来自总结里的 `scenario`（舞台处境），不是"发生了什么"。
+   */
+  const opener = useSummary
+    ? openerFromSummary(summary, characters)
+    : null;
+  const openerName = opener ? opener.name : '开场';
+  const firstChar = characters[0]?.name || '角色';
+
+  if (opener) {
     events = [{
-      name: openerName,
+      name: opener.name,
       pressure: 'core',
-      chapter: '图片设定',
+      chapter: opener.chapter,
       time: '',
       storyline: '开场',
-      // 在场角色 = 图片里识别出的所有人（用户以 {{user}} 身份进入，不列进来）
+      participants: opener.participants,
+      location: opener.location,
+    }];
+    storylines = { 开场: { events: [opener.name], core: true, line: '开场' } };
+  } else {
+    /**
+     * 回退路径（总结调用失败）：造一个"与XX相遇"的开场占位，
+     * 让导演指令与状态栏有落点，而不是让 AI 在空事件表上猜。
+     */
+    const fallbackName = `与${firstChar}相遇`;
+    events = [{
+      name: fallbackName,
+      pressure: 'core',
+      chapter: '初始处境',
+      time: '',
+      storyline: '开场',
       participants: characters.map(c => c.name),
       location: profiles.find(p => p.scene)?.scene || '',
     }];
-    storylines = { 开场: { events: [openerName], core: true, line: '开场' } };
-    timeline = {
-      base: '相对纪元',
-      origin: { raw: '图片设定', event: openerName, reason: '图片来源没有时间信息，以开场为原点' },
-      events: events.map(e => ({
-        name: e.name, time: e.time, chapter: e.chapter,
-        pressure: e.pressure, dateKey: null,
-      })),
-      characters: [],
-      worldDate: null,
-      history: [],
-      relativeStats: { relative: 0, vague: 0, periodic: 0 },
-      fromEvents: true,
-    };
-    phasesWithDeltas = [{
-      name: '开场',
-      startEvent: openerName,
-      endEvent: openerName,
-      text: '图片生成的开场：用户与这些角色初次相遇。',
-      characterDeltas: [],
-    }];
+    storylines = { 开场: { events: [fallbackName], core: true, line: '开场' } };
   }
+
+  const openerNameFinal = events[0].name;
+  timeline = {
+    base: '相对纪元',
+    origin: {
+      raw: '',
+      event: openerNameFinal,
+      reason: '图片内容不提供时间信息，以开场处境为起点',
+    },
+    events: events.map(e => ({
+      name: e.name, time: e.time, chapter: e.chapter,
+      pressure: e.pressure, dateKey: null,
+    })),
+    characters: [],
+    worldDate: null,
+    history: [],
+    relativeStats: { relative: 0, vague: 0, periodic: 0 },
+    fromEvents: true,
+    /** 标记：没有真实日期，下游不要当成确切时间用 */
+    approximate: true,
+  };
+  phasesWithDeltas = [{
+    name: '开场',
+    startEvent: openerNameFinal,
+    endEvent: openerNameFinal,
+    text: opener?.note
+      ? `初始处境：${opener.note}`
+      : '图片生成的开场：用户与这些角色初次相遇。',
+    characterDeltas: [],
+  }];
 
   // ---------- 3. 变量树 ----------
   /**
@@ -1227,20 +1207,18 @@ export async function buildCardFromExtraction(cfg = {}) {
 
   // ---------- 4. 世界观 ----------
   /**
-   * 有叙事抽取时，世界观条目用**抽出来的**（地点 / 势力 / 体系 / 历史）——
-   * 这才是"和小说路径一样"。
-   * 抽不到才回退到"从画面线索推"的保守版本。
+   * 有总结时，世界观条目来自**总结后的设定**（世界概览 / 地点 / 势力 / 体系 / 历史）。
+   * 这是用户要的「总结图片里的信息」——信息归成设定，不是"图片里有什么"。
    *
-   * 另外始终补一条「图中文字（转录）」：那些文字是可靠信息，
-   * 不该因为走了叙事路径就丢掉。
+   * 没有总结（调用失败）才回退到"从画面线索推"的保守版本。
+   * 注意：**不再**塞「图中文字（转录）」条目 —— 那是在指涉图片本身，
+   * 而转录内容已经作为"信息"被总结进设定了。
    */
   let worldbookItems = [];
   if (cfg.wantWorldbook !== false) {
-    const fromNarrative = useNarrative && Array.isArray(nar.worldbookItems) ? nar.worldbookItems : [];
-    const transcriptItems = renderWorldbookFromProfiles(profiles, { title })
-      .filter(i => /图中文字/.test(i.name));
-    worldbookItems = fromNarrative.length
-      ? [...fromNarrative, ...transcriptItems]
+    const fromSummary = useSummary ? worldbookFromSummary(summary) : [];
+    worldbookItems = fromSummary.length
+      ? fromSummary
       : renderWorldbookFromProfiles(profiles, { title });
   }
   const worldbook = assembleWorldbook(timeline, events, characters, worldbookItems, {
@@ -1269,30 +1247,29 @@ export async function buildCardFromExtraction(cfg = {}) {
     ...profiles.flatMap(p => p.worldHints || []),
     ...profiles.map(p => p.gender).filter(Boolean),
   ])].slice(0, 6);
-  const cardFields = {
-    name: title,
-    /**
-     * description：把每个人的**可用信息**写在一起。
-     *
-     * 踩过的坑：原来是 `外貌.slice(0,60)`，于是 description 成了
-     * 「图片未提供；该角色在 6 张截图里没有以任何形式出现：没有头像…」——
-     * 全是"看不见什么"，用户看了不知道这张卡里到底有谁。
-     * 现在按"身份 → 外貌 → 关系"取信息量最大的那个，并且**优先用文字里的信息**。
-     */
-    description: profiles.map(buildProfileSummary).filter(Boolean).join('\n') || '待补充',
-    personality: profiles
-      .map(p => {
-        const hints = (p.personalityHints || []).join('、');
-        return hints ? `${p.name}：${hints}` : '';
-      }).filter(Boolean).join('\n') || '待补充',
-    /**
-     * scenario：优先用**文字里明确说的情境**（帖文/聊天记录里的地点与关系），
-     * 其次是画面场景描述。都不行才留待补充。
-     */
-    scenario: buildScenario(profiles) || '由图片生成，场景与剧情待用户补充',
-    first_mes: buildFirstMes(characters, profiles),
-    tags,
-  };
+
+  /**
+   * 有总结时，主字段直接用**总结后的设定**：
+   *   description = 有谁、是谁、什么关系；personality = 性格；
+   *   scenario = 舞台处境；first_mes = 开场白。
+   * 这样卡里读到的就是**设定**，没有"图片中/画面里"，也没有剧情列表。
+   *
+   * 回退路径（总结失败）仍用画面事实拼，并在措辞上尽量少提图片。
+   */
+  const cardFields = useSummary
+    ? cardFieldsFromSummary(summary, { title, tags })
+    : {
+      name: title,
+      description: profiles.map(buildProfileSummary).filter(Boolean).join('\n') || '待补充',
+      personality: profiles
+        .map(p => {
+          const hints = (p.personalityHints || []).join('、');
+          return hints ? `${p.name}：${hints}` : '';
+        }).filter(Boolean).join('\n') || '待补充',
+      scenario: buildScenario(profiles) || '待补充：请补充故事发生的舞台与处境。',
+      first_mes: buildFirstMes(characters, profiles),
+      tags,
+    };
 
   // ---------- 7. 组装完整卡 ----------
   const card = assembleCharacterCard({
@@ -1306,7 +1283,7 @@ export async function buildCardFromExtraction(cfg = {}) {
 
   return {
     card,
-    // ⚠️ 这里返回的是**传入的世界观条目原文**（图片推断出来的那几条），
+    // ⚠️ 这里返回的是**传入的世界观条目原文**（总结出来的那几条），
     // 不是 `assembleWorldbook` 组装的全部条目 —— 后者还含 timeline / 人物 / 事件等。
     // 一开始我误取了 `.entries`，于是条目里 `content` 是 undefined（实测踩过）。
     worldbook: worldbookItems,
@@ -1315,6 +1292,8 @@ export async function buildCardFromExtraction(cfg = {}) {
     worldbookName: worldbook.name,
     variables, statusbar, characters, events, timeline, phases: phasesWithDeltas,
     cardFields, genreHint,
+    /** 设定总结（无总结时为 null），落盘成 card_summary.json 便于核对 */
+    cardSummary: summary,
   };
 }
 
@@ -1424,6 +1403,14 @@ export async function writeImageCardOutputs(outDir, result, extra = {}) {
   await put('regex_scripts.json', j(result.statusbar.regexScripts));
   await put('statusbar_preview.html', makeStatusbarPreview(result.statusbar));
   if (extra.vision) await put('vision.json', j(extra.vision));
+  /**
+   * 设定总结的原始产出。
+   *
+   * 单独落盘是为了事后核对"模型到底总结出了什么" —— 卡里只是它的投影，
+   * 出问题时看这个文件比反推快得多。注意**不能**叫 summary.json：
+   * 那个名字属于"变更总结"，前端与 /api/tasks/:id/summary 都按它读。
+   */
+  if (extra.cardSummary) await put('card_summary.json', j(extra.cardSummary));
   if (extra.meta) await put('meta.json', j(extra.meta));
 
   /**

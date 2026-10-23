@@ -221,56 +221,55 @@ export async function startImageCard(job, {
   }
 
   /**
-   * 把图片内容当"原文"抽剧情。
+   * 把图片里的信息总结成**设定**。
    *
    * ⚠️ 这一段**必须**和本地 Web 版（server.js）保持一致。
-   * 踩过的坑：最初只把它接进了 server.js，忘了插件这条路 ——
-   * 结果同一个插件生成的卡仍然是"只有外貌 + 一个开场占位"，
-   * 而用户看到的正是插件里的结果（vision.json 里已经有 transcript 了，
-   * 说明新 prompt 生效了，但剧情抽取压根没跑）。
+   * 踩过两次坑：
+   *   ① 最初只把它接进了 server.js，忘了插件这条路 ——
+   *      用户用的正是插件，于是插件生成的卡仍然是"只有外貌 + 一个开场占位"。
+   *   ② 再往前一版做成了"抽剧情"（事件/故事线/阶段），但用户要的是
+   *      「总结图片里的内容信息」，不要「图片里发生了什么剧情」——
+   *      所以现在是 **信息 → 设定** 的归纳，不产出剧情事件。
    *
-   * 抽不出（纯立绘）返回 null，装配段会回退到旧行为。
+   * 总结失败返回 null，装配段回退到"只有画面事实"的模式。
    */
-  let narrative = null;
+  let settingSummary = null;
   try {
-    const [{ extractNarrativeFromImages, hasNarrativeSource }, { makeLLM }] = await Promise.all([
-      importCore('image_narrative.js'),
+    const [{ extractCardSummary }, { makeLLM }] = await Promise.all([
+      importCore('image_summary.js'),
       importCore('llm.js'),
     ]);
-    emit('progress', { step: 'Narrative', msg: '把图片内容当原文抽取剧情…', ts: Date.now() });
-    const narrativeLlm = makeLLM({
+    emit('progress', { step: 'Summary', msg: '总结图片里的信息，归纳成角色与世界的设定…', ts: Date.now() });
+    const summaryLlm = makeLLM({
       baseUrl: String(baseUrl || '').replace(/\/+$/, ''),
       apiKey, model,
     }, preset || null);
-    narrative = await extractNarrativeFromImages({
-      llm: narrativeLlm,
+    settingSummary = await extractCardSummary({
+      llm: summaryLlm,
       profiles: vision.profiles,
-      imageCount: imagePaths.length,
-      concurrency: Number(concurrency) || 3,
-      send: (ev) => emit(ev.step || 'Narrative', ev.msg, ev),
+      hint: String(hint || '').trim() || undefined,
+      send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
     });
-    if (narrative) {
+    if (settingSummary) {
       emit('progress', {
-        step: 'Narrative',
-        msg: `图片内容抽取完成：${narrative.events.length} 事件 · `
-          + `${narrative.phases.length} 阶段 · ${narrative.worldbookItems.length} 世界观 · `
-          + `${narrative.characters.length} 人物`,
+        step: 'Summary',
+        msg: `设定总结完成：人物 ${settingSummary.characters.length} 人 · `
+          + `地点 ${settingSummary.world.locations.length} · 势力 ${settingSummary.world.factions.length} · `
+          + `体系 ${settingSummary.world.systems.length}`,
         ts: Date.now(),
       });
-    } else if (hasNarrativeSource(vision.profiles)) {
-      emit('progress', { step: 'WARN', msg: '图片里有文字但没能抽出剧情，只按画面生成', ts: Date.now() });
     } else {
       emit('progress', {
-        step: 'Narrative',
-        msg: '图片里没有可读文字（纯立绘/画面），只按画面生成人物档案',
+        step: 'Summary',
+        msg: '没能总结出设定，将只按画面事实生成（卡会比较薄）',
         ts: Date.now(),
       });
     }
   } catch (e) {
-    // 叙事抽取失败不能让整个任务挂掉 —— 回退到"只有外貌"仍然能出一张卡
+    // 总结失败不能让整个任务挂掉 —— 回退到画面事实仍然能出一张卡
     emit('progress', {
       step: 'WARN',
-      msg: `从图片内容抽取剧情失败，将只按画面生成人物档案：${e.message}`,
+      msg: `总结图片信息失败，将只按画面事实生成人物档案：${e.message}`,
       ts: Date.now(),
     });
   }
@@ -278,7 +277,7 @@ export async function startImageCard(job, {
   const result = await buildCardFromExtraction({
     profiles: vision.profiles,
     title,
-    narrative,
+    summary: settingSummary,
     wantWorldbook: wantWorldbook !== false,
   });
   const sum = summarizeCard(result);
@@ -291,6 +290,8 @@ export async function startImageCard(job, {
   const written = await writeImageCardOutputs(job.outDir, result, {
     imagePaths,
     vision: { raw: vision.raw, profiles: vision.profiles },
+    // 设定总结单独落盘（card_summary.json），与 Web 版行为一致
+    cardSummary: settingSummary,
     meta: {
       taskId: job.taskId, kind: 'image-card', title,
       createdAt: job.startedAt, model,

@@ -29,7 +29,7 @@ import {
   writeImageCardOutputs, summarizeCard,
   MAX_IMAGES, DEFAULT_VISION_BATCH, DEFAULT_VISION_CONCURRENCY,
 } from './src/image_card.js';
-import { extractNarrativeFromImages, hasNarrativeSource } from './src/image_narrative.js';
+import { extractCardSummary } from './src/image_summary.js';
 import { summarizeAugment, summarizeGenerate, renderSummaryMarkdown } from './src/summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1075,55 +1075,52 @@ app.post(
         });
       }
 
-      // ---------- 把图片内容当"原文"抽剧情 ----------
+      // ---------- 把图片里的信息总结成设定 ----------
       /**
-       * 这是图片路径的**主路径**：截图里的帖文/聊天记录/旁白本来就有完整情节，
-       * 所以复用小说路径的那套 STEP prompt 抽出事件、故事线、阶段、世界观。
+       * 这是图片路径的正路：
+       *   把「转录的文字 + 画面上看得见的事实」总结成**角色与世界的设定**。
        *
-       * 抽不出（纯立绘、没有可读文字）就返回 null，装配段会回退到
-       * "只有外貌 + 一个开场占位"的旧行为 —— 那条路仍然要保留。
+       * 刻意**不抽剧情**（不产出事件列表 / 故事线 / 阶段）——
+       * 用户明确要求过："不是图片里面怎么怎么样，图片里发生了什么剧情"。
+       * 图片给的是**信息**，归纳成设定就够了；剧情留给用户自己玩。
+       *
+       * 总结失败就返回 null，装配段回退到"只有画面事实"的模式。
        */
-      emit('progress', { step: 'Narrative', msg: '把图片内容当原文抽取剧情…', ts: Date.now() });
-      let narrative = null;
+      emit('progress', { step: 'Summary', msg: '总结图片里的信息，归纳成角色与世界的设定…', ts: Date.now() });
+      let settingSummary = null;
       try {
         // 复用同一套 LLM 配置（baseUrl / key / 模型 / 预设）
-        const narrativeLlm = makeLLM({
+        const summaryLlm = makeLLM({
           baseUrl: String(baseUrl).replace(/\/+$/, ''),
           apiKey,
           model,
         }, preset || null);
-        narrative = await extractNarrativeFromImages({
-          llm: narrativeLlm,
+        settingSummary = await extractCardSummary({
+          llm: summaryLlm,
           profiles: vision.profiles,
-          imageCount: vision.images.length,
-          // 与视觉抽取同一份并发设置（默认 3）
-          concurrency: Number(opts.concurrency) || 3,
-          worldProbeChars: Number(opts.worldProbeChars) || undefined,
-          charProbeChars: Number(opts.charProbeChars) || undefined,
-          send: (ev) => emit(ev.step || 'Narrative', ev.msg, ev),
+          hint: String(hint || '').trim() || undefined,
+          send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
         });
       } catch (e) {
-        // 叙事抽取失败不能让整个任务挂掉 —— 回退到旧路径仍然能出一张卡
+        // 总结失败不能让整个任务挂掉 —— 回退到画面事实仍然能出一张卡
         emit('progress', {
           step: 'WARN',
-          msg: `从图片内容抽取剧情失败，将只按画面生成人物档案：${e.message}`,
+          msg: `总结图片信息失败，将只按画面事实生成人物档案：${e.message}`,
           ts: Date.now(),
         });
       }
-      if (narrative) {
+      if (settingSummary) {
         emit('progress', {
-          step: 'Narrative',
-          msg: `图片内容抽取完成：${narrative.events.length} 事件 · `
-            + `${narrative.phases.length} 阶段 · ${narrative.worldbookItems.length} 世界观 · `
-            + `${narrative.characters.length} 人物`,
+          step: 'Summary',
+          msg: `设定总结完成：人物 ${settingSummary.characters.length} 人 · `
+            + `地点 ${settingSummary.world.locations.length} · 势力 ${settingSummary.world.factions.length} · `
+            + `体系 ${settingSummary.world.systems.length}`,
           ts: Date.now(),
         });
-      } else if (hasNarrativeSource(vision.profiles)) {
-        emit('progress', { step: 'WARN', msg: '图片里有文字但没能抽出剧情，只按画面生成', ts: Date.now() });
       } else {
         emit('progress', {
-          step: 'Narrative',
-          msg: '图片里没有可读文字（纯立绘/画面），只按画面生成人物档案',
+          step: 'Summary',
+          msg: '没能总结出设定，将只按画面事实生成（卡会比较薄）',
           ts: Date.now(),
         });
       }
@@ -1133,7 +1130,7 @@ app.post(
       const result = await buildCardFromExtraction({
         profiles: vision.profiles,
         title: finalTitle,
-        narrative,
+        summary: settingSummary,
         wantWorldbook: wantWorldbook !== 'false' && wantWorldbook !== false,
       });
 
@@ -1199,6 +1196,8 @@ app.post(
       const written = await writeImageCardOutputs(outDir, result, {
         imagePaths: localImages,
         vision: { raw: vision.raw, profiles: vision.profiles },
+        // 设定总结单独落盘（card_summary.json），便于事后核对模型总结出了什么
+        cardSummary: settingSummary,
         meta,
       });
 
