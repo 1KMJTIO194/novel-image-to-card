@@ -32,6 +32,7 @@ import {
 import { extractCardSummary } from './src/image_summary.js';
 import { refineMainAppearance } from './src/image_detail.js';
 import { normalizeDetailLevel } from './src/detail_level.js';
+import { normalizeContentMode } from './src/content_mode.js';
 import { summarizeAugment, summarizeGenerate, renderSummaryMarkdown } from './src/summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -358,6 +359,8 @@ app.post(
         resumeBatches: !!resumeTaskId,
         // 生成档位：基础版（默认）/ 完整版（人物与世界观写更细，token 更高）
         detailLevel: normalizeDetailLevel(req.body?.detailLevel ?? options.detailLevel),
+        // 角色卡版本：普通版（默认，不含成人内容）/ 成人版
+        contentMode: normalizeContentMode(req.body?.contentMode ?? options.contentMode),
         ...options,
       };
 
@@ -1034,6 +1037,19 @@ app.post(
         send('progress', { step: 'Init', msg: '生成档位：完整版（人物/世界观/概况都会写得更细，token 消耗更高）', ts: Date.now() });
       }
 
+      /**
+       * 角色卡版本：普通版（默认，不含成人内容）/ 成人版。
+       * 普通版会在 prompt 与落盘两层都拦住成人内容。
+       */
+      const contentMode = normalizeContentMode(req.body?.contentMode ?? opts.contentMode);
+      send('progress', {
+        step: 'Init',
+        msg: contentMode === 'adult'
+          ? '角色卡版本：成人版（完整包含成人内容；要求出场角色均为成年）'
+          : '角色卡版本：普通版（不含成人内容）',
+        ts: Date.now(),
+      });
+
       let preset = null;
       if (presetRaw) {
         const v = validatePreset(presetRaw);
@@ -1174,6 +1190,8 @@ app.post(
           hint: String(hint || '').trim() || undefined,
           // 档位：基础版省 token / 完整版写更细
           detailLevel,
+          // 版本：普通版禁止成人内容 / 成人版允许并写具体
+          contentMode,
           send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
         });
       } catch (e) {
@@ -1215,6 +1233,7 @@ app.post(
               profiles: vision.profiles,
               // 档位决定精修人数与每人看图数；显式给了 detailMax 则以它为准
               detailLevel,
+              contentMode,
               ...(opts.detailMax === undefined ? {} : { max: Math.max(0, Math.min(8, Number(opts.detailMax) || 0)) }),
               send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
             });
@@ -1250,6 +1269,8 @@ app.post(
         title: finalTitle,
         summary: settingSummary,
         wantWorldbook: wantWorldbook !== 'false' && wantWorldbook !== false,
+        // 版本：普通版会把成人字段从条目里删掉
+        contentMode,
       });
 
       const sum = summarizeCard(result);
@@ -1304,6 +1325,8 @@ app.post(
         sawImage: vision.sawImage,
         // 生成档位（basic / full）—— 事后核对 token 花在哪、卡为何更细
         detailLevel,
+        // 角色卡版本（general / adult）
+        contentMode,
         tokens: { card: Math.round(sum.cardBytes / 1.6) },
         usage: {
           calls: vision.usage.calls.length,

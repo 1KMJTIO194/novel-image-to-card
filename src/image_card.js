@@ -29,6 +29,7 @@ import { parseDateParts } from './dates.js';
 import { generateStatusbar, THEMES } from './step75_statusbar.js';
 import { summarizeGenerate, renderSummaryMarkdown } from './summary.js';
 import { normalizeTier } from './tiers.js';
+import { normalizeContentMode, isAdultMode, stripAdultFieldsFromYaml } from './content_mode.js';
 import { sliceAllForVision } from './image_slice.js';
 import {
   renderSettingsYaml, worldbookFromSummary, cardFieldsFromSummary, openerFromSummary,
@@ -1041,9 +1042,12 @@ export function renderWorldbookFromProfiles(profiles = [], { title = '' } = {}) 
  * @param {Array} summaryChars 归一化后的 summary.characters
  * @param {Array} profiles 视觉档案
  * @param {string} protagonistName
+ * @param {'general'|'adult'} [contentMode] 普通版会再删一道成人字段
  */
-export function mergeSummaryCharacters(summaryChars = [], profiles = [], protagonistName = '') {
+export function mergeSummaryCharacters(summaryChars = [], profiles = [], protagonistName = '', contentMode = 'general') {
   const usedProfiles = new Set();
+  /** 普通版：渲染后统一删掉成人字段（prompt 已要求，但模型可能照写） */
+  const gate = (yaml) => (isAdultMode(contentMode) ? yaml : stripAdultFieldsFromYaml(yaml));
 
   /** 名字归一化：去「（图N）」、空白、标点、大小写 */
   const norm = (s) => String(s || '')
@@ -1092,7 +1096,7 @@ export function mergeSummaryCharacters(summaryChars = [], profiles = [], protago
       tier,
       role: tier,
       // 设定 YAML：外貌缺失时用画面事实补
-      content_yaml: renderSettingsYaml(c, p),
+      content_yaml: gate(renderSettingsYaml(c, p)),
       aliases: [...new Set([...aliases, ...((p?.aliases) || [])])],
       ...(p ? { imageIndex: p.imageIndex, confidence: p.confidence } : {}),
       fromSummary: true,
@@ -1106,7 +1110,7 @@ export function mergeSummaryCharacters(summaryChars = [], profiles = [], protago
       name: p.name,
       tier: out.length === 0 ? '主角' : '主要NPC',
       role: out.length === 0 ? '主角' : '主要NPC',
-      content_yaml: renderSettingsYaml({ name: p.name, aliases: p.aliases }, p),
+      content_yaml: gate(renderSettingsYaml({ name: p.name, aliases: p.aliases }, p)),
       aliases: p.aliases || [],
       imageIndex: p.imageIndex,
       confidence: p.confidence,
@@ -1149,6 +1153,8 @@ export async function buildCardFromExtraction(cfg = {}) {
    */
   const summary = cfg.summary && typeof cfg.summary === 'object' ? cfg.summary : null;
   const useSummary = !!summary && Array.isArray(summary.characters) && summary.characters.length > 0;
+  /** 角色卡版本：普通版（默认，不含成人内容）/ 成人版 */
+  const contentMode = normalizeContentMode(cfg.contentMode ?? summary?.contentMode);
 
   // ---------- 1. 人物条目 ----------
   /**
@@ -1156,12 +1162,15 @@ export async function buildCardFromExtraction(cfg = {}) {
    *（画面事实是"看得见的"，不是"这是张图片"）。
    */
   const characters = useSummary
-    ? mergeSummaryCharacters(summary.characters, profiles, protagonistName)
+    ? mergeSummaryCharacters(summary.characters, profiles, protagonistName, contentMode)
     : profiles.map((p, i) => ({
       name: p.name,
       tier: i === 0 || p.name === protagonistName ? '主角' : '主要NPC',
       role: i === 0 ? '主角' : '主要NPC',
-      content_yaml: renderContentYaml(p, { protagonistName }),
+      // 回退路径（没有总结时）：普通版同样要删掉成人字段占位
+      content_yaml: isAdultMode(contentMode)
+        ? renderContentYaml(p, { protagonistName })
+        : stripAdultFieldsFromYaml(renderContentYaml(p, { protagonistName })),
       aliases: p.aliases || [],
       imageIndex: p.imageIndex,
       confidence: p.confidence,

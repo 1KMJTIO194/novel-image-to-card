@@ -70,10 +70,16 @@ const batchSize = Number(args.batch) || DEFAULT_VISION_BATCH;
 const dryRun = !!args['dry-run'];
 /** 生成档位：默认基础版；--full 更细但更耗 token */
 const detailLevel = args.full ? 'full' : 'basic';
+/**
+ * 角色卡版本：默认普通版（不含成人内容）；--adult 生成完整成人版。
+ * 默认必须是普通版 —— 不能让用户不知情就产出成人内容。
+ */
+const contentMode = args.adult ? 'adult' : 'general';
 
 console.log(`目录: ${absDir}`);
 console.log(`图片: ${images.length} 张（前 3 张：${images.slice(0, 3).map(p => path.basename(p)).join(', ')}）`);
 console.log(`档位: ${detailLevel === 'full' ? '完整版（更细，token 更高）' : '基础版'}`);
+console.log(`版本: ${contentMode === 'adult' ? '成人版（完整包含成人内容；出场角色须成年）' : '普通版（不含成人内容）'}`);
 console.log(`标题: ${title}`);
 
 // ---- dry-run：只报告批数与切片计划 ----
@@ -150,7 +156,7 @@ let llm = null;
 try {
   const { makeLLM } = await import(pathToFileURL(path.join(ROOT, 'src/llm.js')).href);
   llm = makeLLM({ baseUrl, apiKey, model }, null);
-  summary = await extractCardSummary({ llm, profiles: vision.profiles, hint: hint || undefined, detailLevel, send: onProgress });
+  summary = await extractCardSummary({ llm, profiles: vision.profiles, hint: hint || undefined, detailLevel, contentMode, send: onProgress });
 } catch (e) {
   console.warn(`  总结失败（会回退到画面事实）：${e.message}`);
 }
@@ -171,6 +177,7 @@ if (summary && llm && !args['no-refine']) {
       images: images.map((p, i) => ({ index: i, path: p })),
       profiles: vision.profiles,
       detailLevel,
+      contentMode,
       ...(args['detail-max'] === undefined ? {} : { max: Math.max(0, Math.min(8, Number(args['detail-max']) || 0)) }),
       send: onProgress,
     });
@@ -183,7 +190,7 @@ if (summary && llm && !args['no-refine']) {
 }
 
 console.log('\n=== 3/3 装配 + 落盘 ===');
-const result = await buildCardFromExtraction({ profiles: vision.profiles, title, summary, wantWorldbook: true });
+const result = await buildCardFromExtraction({ profiles: vision.profiles, title, summary, wantWorldbook: true, contentMode });
 const sum = summarizeCard(result);
 const written = await writeImageCardOutputs(outDir, result, {
   imagePaths: images,
@@ -196,6 +203,7 @@ const written = await writeImageCardOutputs(outDir, result, {
     model, baseUrl,
     imageCount: images.length,
     detailLevel,
+    contentMode,
     hint: hint || null,
     counts: {
       images: images.length, characters: sum.characters,

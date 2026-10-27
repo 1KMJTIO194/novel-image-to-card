@@ -132,6 +132,11 @@ window.__ModuleLoader__.load({
       const [chapterRange, setChapterRange] = useState('all');
       /** 生成档位：basic（默认，token 省）/ full（更细致，token 更多） */
       const [detailLevel, setDetailLevel] = useState('basic');
+      /**
+       * 角色卡版本：general（默认，不含成人内容）/ adult（完整包含成人内容）。
+       * 默认必须是普通版 —— 不能让用户不知情就生成成人内容。
+       */
+      const [contentMode, setContentMode] = useState('general');
       /** 完善指令：会拼进每个抽取步骤的 prompt */
       const [instruction, setInstruction] = useState('');
 
@@ -283,6 +288,8 @@ window.__ModuleLoader__.load({
           fd.append('chapterRange', chapterRange || 'all');
           // 生成档位（完善任务忽略）
           fd.append('detailLevel', detailLevel === 'full' ? 'full' : 'basic');
+          // 角色卡版本（完善任务忽略：完善是改用户已有的卡，不该改它的性质）
+          fd.append('contentMode', contentMode === 'adult' ? 'adult' : 'general');
           if (tab === 'augment') {
             fd.append('strategy', strategy);
             fd.append('novelText', text);
@@ -388,6 +395,19 @@ window.__ModuleLoader__.load({
             },
             h('option', { value: 'basic' }, '基础版（默认，token 少）'),
             h('option', { value: 'full' }, '完整版（人物/世界观更细，token 更多）')))
+          : null,
+
+        // 角色卡版本（普通版默认；完善任务不改卡性质，故不显示）
+        tab !== 'augment'
+          ? h(Field, { label: '角色卡版本' },
+            h('div', { className: 'n2c-col' },
+              h('select', {
+                className: 'n2c-select', value: contentMode, onChange: e => setContentMode(e.target.value),
+              },
+              h('option', { value: 'general' }, '普通版（默认，不含成人内容）'),
+              h('option', { value: 'adult' }, '成人版（完整包含成人内容）')),
+              h('div', { className: 'n2c-hint' },
+                '成人版要求出场角色均为成年人；资料显示未成年时不会写成人内容。')))
           : null,
 
         h('div', { className: 'n2c-row' },

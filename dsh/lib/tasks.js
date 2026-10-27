@@ -102,6 +102,8 @@ export async function startGenerate(job, {
   chapterRange = 'all', limits = null, preset = null,
   // 生成档位：basic（默认）/ full（更细、更耗 token）
   detailLevel = 'basic',
+  // 角色卡版本：general（默认，不含成人内容）/ adult
+  contentMode = 'general',
   // 高级项，与本地版同名同义
   options = {},
 }) {
@@ -145,6 +147,8 @@ export async function startGenerate(job, {
     resumeBatches: false,
     // 生成档位（pipeline 内部按档位追加要求）
     detailLevel,
+    // 角色卡版本（pipeline 内部按版本追加规则 + 删成人字段）
+    contentMode,
     ...options,
   };
   return runPipeline(config, job.emit);
@@ -202,6 +206,8 @@ export async function startImageCard(job, {
   batchSize = undefined, concurrency = undefined,
   // 生成档位：basic（默认）/ full（更细、更耗 token）
   detailLevel = 'basic',
+  // 角色卡版本：general（默认，不含成人内容）/ adult
+  contentMode = 'general',
 }) {
   const {
     extractCharactersFromImages, buildCardFromExtraction, writeImageCardOutputs, summarizeCard,
@@ -256,6 +262,8 @@ export async function startImageCard(job, {
       hint: String(hint || '').trim() || undefined,
       // 档位：基础版省 token / 完整版写更细
       detailLevel,
+      // 版本：普通版禁止成人内容 / 成人版允许并写具体
+      contentMode,
       send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
     });
     if (settingSummary) {
@@ -282,6 +290,7 @@ export async function startImageCard(job, {
           profiles: vision.profiles,
           // 档位决定精修人数与每人看图数
           detailLevel,
+          contentMode,
           send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
         });
         if (refined.refined.length) {
@@ -320,6 +329,7 @@ export async function startImageCard(job, {
     title,
     summary: settingSummary,
     wantWorldbook: wantWorldbook !== false,
+    contentMode,
   });
   const sum = summarizeCard(result);
   emit('progress', {

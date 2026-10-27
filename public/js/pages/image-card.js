@@ -246,6 +246,19 @@ export async function renderImageCard(mount) {
   el('option', { value: 'basic', selected: true }, '基础版（默认，token 少）'),
   el('option', { value: 'full' }, '完整版（更细致，token 更多）'));
 
+  /**
+   * 角色卡版本：普通版（默认，不含成人内容）/ 成人版（完整包含成人内容）。
+   *
+   * 图片路径的特殊之处：画面能给的是"看得见的体型与衣着"，
+   * 给不了"私处细节"这类设定。所以成人版也**只写转录文字明确写了的**，
+   * 没写到就写「未提及」——不编造。
+   */
+  const contentModeSelect = el('select', {
+    id: 'image-card-content-mode', name: 'contentMode',
+  },
+  el('option', { value: 'general', selected: true }, '普通版（默认，不含成人内容）'),
+  el('option', { value: 'adult' }, '成人版（完整包含成人内容）'));
+
   page.appendChild(el('div', { class: 'card' },
     el('h3', { text: '② 设定（都可选）' }),
     field({ label: '角色卡名称', control: titleInput, id: 'image-card-title', name: 'title' }),
@@ -254,6 +267,13 @@ export async function renderImageCard(mount) {
       id: 'image-card-level', name: 'detailLevel',
       hint: '基础版：与之前一致，token 消耗少。完整版：人物字段更全、外貌服装分层更细、'
         + '世界观条目更多更长、会精修更多主要角色 —— 代价是更多 token 与更久时间。',
+    }),
+    field({
+      label: '角色卡版本', control: contentModeSelect,
+      id: 'image-card-content-mode', name: 'contentMode',
+      hint: '普通版：不含任何成人内容，成人字段整段省略。成人版：允许更直白的身体描写，'
+        + '并补写成人字段（只写转录文字明确提到的，没写到写「未提及」）。'
+        + '成人版要求出场角色均为成年人。',
     }),
     field({
       label: '文字补充设定', control: hintInput, id: 'image-card-hint', name: 'hint',
@@ -462,6 +482,8 @@ export async function renderImageCard(mount) {
     fd.append('wantWorldbook', worldToggle.checked ? 'true' : 'false');
     // 生成档位：basic / full
     fd.append('detailLevel', levelSelect.value === 'full' ? 'full' : 'basic');
+    // 角色卡版本：general（默认）/ adult
+    fd.append('contentMode', contentModeSelect.value === 'adult' ? 'adult' : 'general');
     // 主要角色外观精修（服务端 options.refineMainAppearance）
     fd.append('options', JSON.stringify({ refineMainAppearance: refineToggle.checked }));
     // 分批张数：长漫画可调；后端会 clamp 到 1..12

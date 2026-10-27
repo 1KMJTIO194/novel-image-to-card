@@ -19,6 +19,12 @@
 import { pMap } from './utils.js';
 import * as S from './steps.js';
 import { normalizeDetailLevel, withDetailRules, isFull } from './detail_level.js';
+import {
+  normalizeContentMode, withContentRules, stripAdultFieldsFromYaml, describeContentMode, isAdultMode,
+} from './content_mode.js';
+
+/** 内联别名，避免和 isAdultMode 的语义混淆（都表示"是否成人版"） */
+const isAdultModeEnabled = isAdultMode;
 
 /** 指涉图片本身的词 —— 出现在卡里就说明模型在描述图，而不是写设定 */
 const IMAGE_WORDS = /(图片|画面中|画面里|画面为|截图中|截图的|图中|本图|该图|此图|头像中|头像的|像素|分辨率|构图|封面排版|界面截图)/;
@@ -191,6 +197,13 @@ export function normalizeSummary(raw) {
         relations: g('relations'),
         background: g('background'),
         abilities: g('abilities'),
+        /**
+         * 成人字段：**仅在成人版**保留（普通版在 extractCardSummary 里统一删掉）。
+         * 图片路径的特殊约束：这些只能来自转录文字，不能从画面"看出来"，
+         * 所以资料没写就写「未提及」，不编造。
+         */
+        eroticAbilities: g('erotic_abilities'),
+        privateDetails: g('私处细节描写', '私处'),
         notes: g('notes'),
       };
     })
@@ -232,7 +245,15 @@ export async function extractCardSummary(cfg = {}) {
    * 两档都会追加「禁止推测未揭示的真相」。
    */
   const level = normalizeDetailLevel(cfg.detailLevel);
-  const system = withDetailRules(S.STEP_IMAGE_SUMMARY, level, 'summary');
+  const contentMode = normalizeContentMode(cfg.contentMode);
+  /**
+   * 系统提示 = 原 prompt + 档位规则（完整版更细）+ 版本规则（普通版禁成人内容）。
+   *
+   * 顺序刻意是先档位后版本：版本规则放最后，离输出更近，模型更容易遵守。
+   */
+  const system = withContentRules(
+    withDetailRules(S.STEP_IMAGE_SUMMARY, level, 'summary'), contentMode, 'summary',
+  );
 
   const hint = String(cfg.hint || '').trim();
   const userText = [
@@ -245,7 +266,22 @@ export async function extractCardSummary(cfg = {}) {
 
   const raw = await llm.chatJSON(system, userText, 'image-summary');
   const summary = normalizeSummary(raw);
-  if (summary) summary.detailLevel = level;
+  if (summary) {
+    summary.detailLevel = level;
+    summary.contentMode = contentMode;
+    /**
+     * 普通版：**代码兜底清空成人字段**（prompt 已经要求省略，但模型可能照写）。
+     * 清空而不是删键，是为了让后续渲染逻辑看到"没有内容"直接跳过。
+     */
+    if (!isAdultModeEnabled(contentMode)) {
+      for (const c of summary.characters) {
+        c.eroticAbilities = '';
+        c.privateDetails = '';
+        // 顺手把可能混进 notes 的成人字段标注也去掉
+        if (c.notes) c.notes = stripAdultFieldsFromYaml(c.notes);
+      }
+    }
+  }
 
   if (!summary.characters.length) return null;
   send({
@@ -321,6 +357,13 @@ export function renderSettingsYaml(c, visual = null) {
   out.push(block('background', c.background));
   out.push(block('abilities', c.abilities));
   out.push(block('special_notes', c.notes));
+  /**
+   * 成人字段：只在有内容时输出。
+   * 普通版的删除动作在 `extractCardSummary` 里做（直接把字段清空），
+   * 所以这里不需要再判断版本 —— 空值本来就不会渲染。
+   */
+  out.push(block('erotic_abilities', c.eroticAbilities));
+  out.push(block('私处细节描写', c.privateDetails));
 
   return out.filter(Boolean).join('\n');
 }

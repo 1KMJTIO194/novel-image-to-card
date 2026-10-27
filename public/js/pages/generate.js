@@ -261,6 +261,16 @@ export async function renderGenerate(mount, params) {
     el('option', { value: 'basic', selected: true }, '基础版（默认，token 少）'),
     el('option', { value: 'full' }, '完整版（更细致，token 更多）'));
 
+  /**
+   * 角色卡版本：普通版（默认，不含成人内容）/ 成人版（完整包含成人内容）。
+   *
+   * 默认必须是普通版；成人版通过 `contentMode=adult` 传给后端，
+   * 后端会在 prompt 层要求写具体、并强制"出场角色须成年"。
+   */
+  const contentModeSelect = el('select', { id: 'f-content-mode', name: 'contentMode' },
+    el('option', { value: 'general', selected: true }, '普通版（默认，不含成人内容）'),
+    el('option', { value: 'adult' }, '成人版（完整包含成人内容）'));
+
   const preview = el('div', { class: 'hint', style: { marginTop: '8px' } });
 
   /** 记住选中的文件；切页回来时用它继续（input.files 无法回填） */
@@ -508,6 +518,15 @@ export async function renderGenerate(mount, params) {
       name: 'detailLevel',
       hint: '基础版：与之前一致，token 消耗少。完整版：人物档案字段更全、写得更长、'
         + '世界观条目更细、剧情概要更长 —— 代价是更多 token 与更久时间。',
+    }),
+    field({
+      label: '角色卡版本',
+      control: contentModeSelect,
+      id: 'f-content-mode',
+      name: 'contentMode',
+      hint: '普通版：不含任何成人内容，成人字段整段省略。成人版：完整包含成人内容'
+        + '（erotic_abilities / 私处细节描写 写具体）。成人版要求出场角色均为成年人；'
+        + '资料显示未成年时不会写成人内容。',
     }),
   );
 
@@ -1316,6 +1335,8 @@ export async function renderGenerate(mount, params) {
     fd.append('title', titleInput.value.trim() || novel.name.replace(/\.[^.]+$/, ''));
     // 生成档位：basic / full（完善已有卡的路径不用它，那是另一套逻辑）
     fd.append('detailLevel', levelSelect.value === 'full' ? 'full' : 'basic');
+    // 角色卡版本：general（默认）/ adult
+    fd.append('contentMode', contentModeSelect.value === 'adult' ? 'adult' : 'general');
     fd.append('limits', JSON.stringify(state.config.limits));
     if (preset) fd.append('preset', JSON.stringify(preset));
     fd.append('options', JSON.stringify({

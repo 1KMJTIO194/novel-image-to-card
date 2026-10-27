@@ -33,6 +33,9 @@ import { splitIntoBatches, createContextChain, describeBatches, DEFAULT_BATCH } 
 import { mergeBatches } from './merge_batches.js';
 import { NPC_TIERS, TIER_RANK, TIER_THRESHOLDS, TIER_DETAIL, LEGACY_ROLE_MAP, normalizeTier, tierDetail } from './tiers.js';
 import { normalizeDetailLevel, detailPreset, withDetailRules } from './detail_level.js';
+import {
+  normalizeContentMode, withContentRules, applyContentModeToCharItem, describeContentMode,
+} from './content_mode.js';
 import { resolveDateYears, formatDate, parseChainedTime, dateTriggerToken, compareDateParts } from './dates.js';
 
 // 分层常量从 src/tiers.js 引入；这里再导出一次，方便老调用方与测试按原路径取用
@@ -116,8 +119,22 @@ export async function runPipeline(config, send) {
    */
   const detailLevel = normalizeDetailLevel(config.detailLevel);
   const detail = detailPreset(detailLevel);
-  const promptChar = withDetailRules(S.STEP_5_CHARACTER, detailLevel, 'character');
-  const promptCharBatch = withDetailRules(S.STEP_5_CHARACTER_BATCH, detailLevel, 'character');
+
+  /**
+   * 角色卡版本：普通版（默认，不含成人内容）/ 成人版。
+   *
+   * 两件事要同时做：
+   *   ① prompt 追加版本规则（普通版明令不写、成人版要求写具体）
+   *   ② **代码再删一道**（普通版把成人字段从 content 里移除）——
+   *      模型经常无视"不要写"的指令，只靠 prompt 不可靠。
+   */
+  const contentMode = normalizeContentMode(config.contentMode);
+  const promptChar = withContentRules(
+    withDetailRules(S.STEP_5_CHARACTER, detailLevel, 'character'), contentMode, 'character',
+  );
+  const promptCharBatch = withContentRules(
+    withDetailRules(S.STEP_5_CHARACTER_BATCH, detailLevel, 'character'), contentMode, 'character',
+  );
   const promptWorldbook = withDetailRules(S.STEP_5_WORLDBOOK, detailLevel, 'worldbook');
   const promptWorldbookItems = withDetailRules(S.STEP_5_WORLDBOOK_ITEMS, detailLevel, 'worldbook');
   const promptWorldbookLoose = withDetailRules(S.STEP_5_WORLDBOOK_LOOSE, detailLevel, 'worldbook');
@@ -180,6 +197,7 @@ export async function runPipeline(config, send) {
   }
   // 档位横幅（必须等 log 定义之后再打，见 logLevelBanner 处的注释）
   if (logLevelBanner) log('Init', logLevelBanner);
+  log('Init', `角色卡版本：${describeContentMode(contentMode)}`);
 
   /** 协作式取消：每个阶段开始前检查一次 */
   const checkAbort = () => {
@@ -960,11 +978,16 @@ export async function runPipeline(config, send) {
       log('WARN', `人物「${r.name}」档案为空或占位，已跳过（返回键：${Object.keys(item).join('/')}）`);
       return null;
     }
+    /**
+     * 普通版：把成人字段从正文里**删掉**（prompt 说了不许，但模型经常不听）。
+     * 成人版原样通过。
+     */
+    const gated = applyContentModeToCharItem({ ...item, content }, contentMode);
     return {
-      ...item,
+      ...gated,
       name: r.name,
       keys: [r.name, ...r.aliases],
-      content,
+      content: gated.content,
       tier: r.tier,
       storyChapters: r.storyChapters,
       storyRatio: r.storyRatio,
@@ -1449,6 +1472,8 @@ export async function runPipeline(config, send) {
     wellKnown: !!popularity.wellKnown,
     /** 生成档位：basic（默认）/ full —— 事后核对 token 花在哪、卡为何更细 */
     detailLevel,
+    /** 角色卡版本：general（默认，不含成人内容）/ adult */
+    contentMode,
     counts: {
       chars: text.length,
       chapters: chunks.length,

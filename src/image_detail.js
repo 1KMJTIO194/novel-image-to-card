@@ -21,6 +21,7 @@
 import { stripImageFraming } from './image_summary.js';
 import { NPC_TIERS } from './tiers.js';
 import { detailPreset } from './detail_level.js';
+import { withContentRules } from './content_mode.js';
 import * as S from './steps.js';
 
 /** 默认最多精修几个角色 */
@@ -184,6 +185,7 @@ export async function refineMainAppearance(cfg = {}) {
   const {
     llm, summary, images = [], profiles = [], send = () => {},
     detailLevel = 'basic',
+    contentMode = 'general',
   } = cfg;
 
   /**
@@ -193,6 +195,11 @@ export async function refineMainAppearance(cfg = {}) {
   const preset = detailPreset(detailLevel);
   const max = cfg.max === undefined ? preset.refineMax : cfg.max;
   const imagesPerChar = cfg.imagesPerChar === undefined ? preset.imagesPerChar : cfg.imagesPerChar;
+  /**
+   * 版本规则也要带给这一个请求：普通版不许写成成人内容，
+   * 成人版允许更直白的身体描写（但仍只能写画面能支持的）。
+   */
+  const detailPrompt = withContentRules(S.STEP_IMAGE_DETAIL, contentMode, 'summary');
 
   const result = { refined: [], skipped: [] };
   if (!summary || !Array.isArray(summary.characters) || !summary.characters.length) return result;
@@ -231,7 +238,7 @@ export async function refineMainAppearance(cfg = {}) {
 
     try {
       send({ step: 'Detail', msg: `精修主要角色外观：${c.name}（${paths.length} 张图）`, ts: Date.now() });
-      const raw = await llm.chatJSON(S.STEP_IMAGE_DETAIL, userText, 'image-detail', {
+      const raw = await llm.chatJSON(detailPrompt, userText, 'image-detail', {
         images: paths,
         temperature: 0.4,
         retries: 2,
