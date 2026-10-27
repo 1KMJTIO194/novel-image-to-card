@@ -18,6 +18,7 @@
  */
 import { pMap } from './utils.js';
 import * as S from './steps.js';
+import { normalizeDetailLevel, withDetailRules, isFull } from './detail_level.js';
 
 /** 指涉图片本身的词 —— 出现在卡里就说明模型在描述图，而不是写设定 */
 const IMAGE_WORDS = /(图片|画面中|画面里|画面为|截图中|截图的|图中|本图|该图|此图|头像中|头像的|像素|分辨率|构图|封面排版|界面截图)/;
@@ -181,6 +182,12 @@ export function normalizeSummary(raw) {
         clothing: g('clothing'),
         personality: g('personality'),
         speechStyle: g('speechStyle'),
+        voiceSample: g('voiceSample'),
+        mannerisms: g('mannerisms', '言行举止'),
+        height: g('height'),
+        weight: g('weight'),
+        measurements: g('measurements'),
+        preferences: g('preferences'),
         relations: g('relations'),
         background: g('background'),
         abilities: g('abilities'),
@@ -220,21 +227,30 @@ export async function extractCardSummary(cfg = {}) {
   const source = buildSummarySource(profiles);
   if (!source.trim()) return null;
 
+  /**
+   * 档位：基础版 = 原样（token 省）；完整版 = 追加"写得更细"的要求。
+   * 两档都会追加「禁止推测未揭示的真相」。
+   */
+  const level = normalizeDetailLevel(cfg.detailLevel);
+  const system = withDetailRules(S.STEP_IMAGE_SUMMARY, level, 'summary');
+
   const hint = String(cfg.hint || '').trim();
   const userText = [
     '下面是从图片里整理出来的资料。请把它们总结成角色卡设定。',
     hint ? `\n【用户补充设定（优先采纳，与资料冲突时以用户为准）】\n${hint}` : '',
     `\n${source}`,
     '\n再提醒一次：写**设定**，不要写"图片中/画面里"，也不要把经过写成剧情事件列表。',
+    isFull(level) ? '\n这是**完整版**：人物与世界观都要写细（见系统提示里的字数与分层要求）。' : '',
   ].filter(Boolean).join('\n');
 
-  const raw = await llm.chatJSON(S.STEP_IMAGE_SUMMARY, userText, 'image-summary');
+  const raw = await llm.chatJSON(system, userText, 'image-summary');
   const summary = normalizeSummary(raw);
+  if (summary) summary.detailLevel = level;
 
   if (!summary.characters.length) return null;
   send({
     step: 'Summary',
-    msg: `信息总结完成：人物 ${summary.characters.length} 人 · `
+    msg: `信息总结完成（${isFull(level) ? '完整版' : '基础版'}）：人物 ${summary.characters.length} 人 · `
       + `地点 ${summary.world.locations.length} · 势力 ${summary.world.factions.length} · `
       + `体系 ${summary.world.systems.length}`,
     ts: Date.now(),
@@ -270,6 +286,21 @@ export function renderSettingsYaml(c, visual = null) {
   if (c.aliases?.length) out.push(`aliases: [${c.aliases.join('、')}]`);
   if (c.gender) out.push(`gender: ${c.gender}`);
   if (c.age) out.push(`age: ${c.age}`);
+  /**
+   * 身高/体重/三围：**带单位**才写。
+   *
+   * 用户反馈过：这几个字段没定格式时模型会写"中等身材"占位，等于白占一行。
+   * 这里只在有数字/单位时才输出；没有就整行不写（模板字段缺失好过写废话）。
+   */
+  const unitLine = (k, val) => {
+    const s = String(val || '').trim();
+    if (!s) return '';
+    if (/未提及|不详|未知|无法判断/.test(s)) return '';
+    return `${k}: ${s}`;
+  };
+  out.push(unitLine('height', c.height));
+  out.push(unitLine('weight', c.weight));
+  out.push(unitLine('measurements', c.measurements));
 
   out.push(line('identity', c.identity));
   // 外貌：优先用总结里的，没有就用画面事实补（画面事实是"看得见的"，不是"图片里"）
@@ -282,7 +313,10 @@ export function renderSettingsYaml(c, visual = null) {
   if (v.personalityHints?.length && !c.personality) {
     out.push(block('personality', v.personalityHints.join('；')));
   }
+  out.push(block('preferences', c.preferences));
   out.push(block('speechStyle', c.speechStyle));
+  out.push(block('voiceSample', c.voiceSample));
+  out.push(block('言行举止', c.mannerisms));
   out.push(block('relations', c.relations));
   out.push(block('background', c.background));
   out.push(block('abilities', c.abilities));

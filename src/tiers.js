@@ -103,3 +103,41 @@ export const TIER_DETAIL = {
   次要NPC: { label: '次要NPC', fields: '身份、性格、外貌、与主角的关系；不确定的字段填"未提及"', minChars: 150 },
   路人NPC: { label: '路人NPC', fields: '只写身份与出现在哪里；其余填"未提及"，不要展开', minChars: 0 },
 };
+
+/**
+ * 完整版的分层要求：在基础版之上加字与字段，但**路人仍然不展开**。
+ *
+ * 为什么路人不变：完整版的意义是"把主要人物写透"，不是"给路人灌水"。
+ * 一条 800 字的路人档案既多花 token，又会在世界书里抢主要角色的注意力。
+ */
+export const TIER_DETAIL_FULL = {
+  主角: {
+    label: '主角（完整版）',
+    fields: '模板字段全部写满；额外写 relations / speechStyle / voiceSample / 言行举止；'
+      + 'appearance 与 clothing 按分层写足；不确定的写"未提及"',
+    minChars: 1000,
+  },
+  主要NPC: {
+    label: '主要NPC（完整版）',
+    fields: '模板字段尽量写满；补 relations / speechStyle / voiceSample / 言行举止；'
+      + '重点写性格、与主角的关系、关键经历',
+    minChars: 700,
+  },
+  次要NPC: {
+    label: '次要NPC（完整版）',
+    fields: '身份、性格、外貌、与主角的关系；能写的模板字段都补上，不确定的写"未提及"',
+    minChars: 260,
+  },
+  路人NPC: { label: '路人NPC', fields: '只写身份与出现在哪里；其余填"未提及"，不要展开', minChars: 0 },
+};
+
+/**
+ * 按档位取分层要求。
+ *
+ * @param {string} tier 分层名
+ * @param {'basic'|'full'} [level]
+ */
+export function tierDetail(tier, level = 'basic') {
+  const table = level === 'full' ? TIER_DETAIL_FULL : TIER_DETAIL;
+  return table[tier] || table['次要NPC'];
+}

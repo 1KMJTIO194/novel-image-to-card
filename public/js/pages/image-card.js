@@ -236,9 +236,25 @@ export async function renderImageCard(mount) {
     type: 'checkbox', id: 'image-card-refine', name: 'refineMainAppearance', checked: true,
   });
 
+  /**
+   * 生成档位：基础版（默认，token 省）/ 完整版（人物与世界观写更细）。
+   * 完整版会让总结要求更长的字段、更多角色做外观精修。
+   */
+  const levelSelect = el('select', {
+    id: 'image-card-level', name: 'detailLevel',
+  },
+  el('option', { value: 'basic', selected: true }, '基础版（默认，token 少）'),
+  el('option', { value: 'full' }, '完整版（更细致，token 更多）'));
+
   page.appendChild(el('div', { class: 'card' },
     el('h3', { text: '② 设定（都可选）' }),
     field({ label: '角色卡名称', control: titleInput, id: 'image-card-title', name: 'title' }),
+    field({
+      label: '生成档位', control: levelSelect,
+      id: 'image-card-level', name: 'detailLevel',
+      hint: '基础版：与之前一致，token 消耗少。完整版：人物字段更全、外貌服装分层更细、'
+        + '世界观条目更多更长、会精修更多主要角色 —— 代价是更多 token 与更久时间。',
+    }),
     field({
       label: '文字补充设定', control: hintInput, id: 'image-card-hint', name: 'hint',
       hint: '写在这里的设定优先于图片推断，并会记进 notes。图片给不了剧情，填一段能显著提升可用性。',
@@ -444,6 +460,8 @@ export async function renderImageCard(mount) {
     fd.append('title', titleInput.value.trim() || '图片生成的角色卡');
     fd.append('hint', hintInput.value.trim());
     fd.append('wantWorldbook', worldToggle.checked ? 'true' : 'false');
+    // 生成档位：basic / full
+    fd.append('detailLevel', levelSelect.value === 'full' ? 'full' : 'basic');
     // 主要角色外观精修（服务端 options.refineMainAppearance）
     fd.append('options', JSON.stringify({ refineMainAppearance: refineToggle.checked }));
     // 分批张数：长漫画可调；后端会 clamp 到 1..12

@@ -222,7 +222,16 @@ async function main() {
   const selects = [...window.document.querySelectorAll('#page select')];
   ok('user 模式下拉有 4 个选项', selects.some(s => s.options.length === 4),
     JSON.stringify(selects.map(s => s.options.length)));
-  ok('下拉可被赋值选中', selects[0].value === 'auto', selects[0].value);
+  /**
+   * 按 name 找，**不按下标** —— 页面新增下拉（如"生成档位"）会插到前面，
+   * 下标断言会假失败。这个坑踩过一次。
+   */
+  const userModeSelect = selects.find(s => s.name === 'userMode') || selects[0];
+  ok('下拉可被赋值选中（userMode）', userModeSelect.value === 'auto', userModeSelect.value);
+  // 新增的生成档位下拉：默认基础版
+  const levelSelect = selects.find(s => s.name === 'detailLevel');
+  ok('存在「生成档位」下拉且默认 basic',
+    !!levelSelect && levelSelect.value === 'basic', JSON.stringify(levelSelect?.value));
 
   console.log('\n【C】页面切换与选择器');
   for (const [hash, sel, label] of [

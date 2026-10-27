@@ -253,6 +253,14 @@ export async function renderGenerate(mount, params) {
   const imageInput = el('input', { type: 'file', accept: 'image/*', multiple: true, id: 'f-images', name: 'images' });
   const titleInput = el('input', { type: 'text', placeholder: '（默认取文件名）', value: state.lastRun?.title || '' });
 
+  /**
+   * 生成档位：基础版（默认，token 省）/ 完整版（人物与世界观写更细）。
+   * 完整版通过 `detailLevel` 传给后端，pipeline 会追加更细的写作要求。
+   */
+  const levelSelect = el('select', { id: 'f-detail-level', name: 'detailLevel' },
+    el('option', { value: 'basic', selected: true }, '基础版（默认，token 少）'),
+    el('option', { value: 'full' }, '完整版（更细致，token 更多）'));
+
   const preview = el('div', { class: 'hint', style: { marginTop: '8px' } });
 
   /** 记住选中的文件；切页回来时用它继续（input.files 无法回填） */
@@ -493,6 +501,14 @@ export async function renderGenerate(mount, params) {
       name: 'title',
       hint: '留空则取文件名，用于在任务列表里辨认',
     })),
+    field({
+      label: '生成档位',
+      control: levelSelect,
+      id: 'f-detail-level',
+      name: 'detailLevel',
+      hint: '基础版：与之前一致，token 消耗少。完整版：人物档案字段更全、写得更长、'
+        + '世界观条目更细、剧情概要更长 —— 代价是更多 token 与更久时间。',
+    }),
   );
 
   // ---------- 断点续跑横幅 ----------
@@ -1298,6 +1314,8 @@ export async function renderGenerate(mount, params) {
     // 不传时服务端照常新建任务目录，不会碰到任何旧批次。
     if (!augmenting && resumeTarget?.taskId) fd.append('resumeTaskId', resumeTarget.taskId);
     fd.append('title', titleInput.value.trim() || novel.name.replace(/\.[^.]+$/, ''));
+    // 生成档位：basic / full（完善已有卡的路径不用它，那是另一套逻辑）
+    fd.append('detailLevel', levelSelect.value === 'full' ? 'full' : 'basic');
     fd.append('limits', JSON.stringify(state.config.limits));
     if (preset) fd.append('preset', JSON.stringify(preset));
     fd.append('options', JSON.stringify({

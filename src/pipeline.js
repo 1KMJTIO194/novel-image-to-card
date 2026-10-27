@@ -31,7 +31,8 @@ import * as T from './templates.js';
 import { generateStatusbar } from './step75_statusbar.js';
 import { splitIntoBatches, createContextChain, describeBatches, DEFAULT_BATCH } from './batcher.js';
 import { mergeBatches } from './merge_batches.js';
-import { NPC_TIERS, TIER_RANK, TIER_THRESHOLDS, TIER_DETAIL, LEGACY_ROLE_MAP, normalizeTier } from './tiers.js';
+import { NPC_TIERS, TIER_RANK, TIER_THRESHOLDS, TIER_DETAIL, LEGACY_ROLE_MAP, normalizeTier, tierDetail } from './tiers.js';
+import { normalizeDetailLevel, detailPreset, withDetailRules } from './detail_level.js';
 import { resolveDateYears, formatDate, parseChainedTime, dateTriggerToken, compareDateParts } from './dates.js';
 
 // 分层常量从 src/tiers.js 引入；这里再导出一次，方便老调用方与测试按原路径取用
@@ -106,6 +107,24 @@ export async function runPipeline(config, send) {
   const worldProbeChars = Number(config.worldProbeChars) || 15000;
   const charProbeChars = Number(config.charProbeChars) || 10000;
   const startedAt = new Date().toISOString();
+
+  /**
+   * 生成档位：基础版（默认，token 省）/ 完整版（人物与世界观写更细、概要更长）。
+   *
+   * 只在**追加要求**层面做差分，不复制整套 prompt：
+   * 基础版行为与之前完全一致，完整版才多花 token。
+   */
+  const detailLevel = normalizeDetailLevel(config.detailLevel);
+  const detail = detailPreset(detailLevel);
+  const promptChar = withDetailRules(S.STEP_5_CHARACTER, detailLevel, 'character');
+  const promptCharBatch = withDetailRules(S.STEP_5_CHARACTER_BATCH, detailLevel, 'character');
+  const promptWorldbook = withDetailRules(S.STEP_5_WORLDBOOK, detailLevel, 'worldbook');
+  const promptWorldbookItems = withDetailRules(S.STEP_5_WORLDBOOK_ITEMS, detailLevel, 'worldbook');
+  const promptWorldbookLoose = withDetailRules(S.STEP_5_WORLDBOOK_LOOSE, detailLevel, 'worldbook');
+  const synopsisMaxChars = detail.synopsisMaxChars;
+  if (detailLevel === 'full') {
+    log('Init', '生成档位：完整版（人物档案更细 / 世界观更细 / 概要更长，token 消耗更高）');
+  }
 
   // 分批参数（10 章 / 3 万字，先到者为准；都可在设置里改）
   const batchOpts = {
@@ -505,7 +524,7 @@ export async function runPipeline(config, send) {
     let batchWorld = [];
     if (mergeWorldCalls) {
       try {
-        const r = await llm.chatJSON(S.STEP_5_WORLDBOOK_ITEMS, batchWorldProbe, 'step5');
+        const r = await llm.chatJSON(promptWorldbookItems, batchWorldProbe, 'step5');
         const world = normalizeWorldbookItems(pickArrayByKeys(r, ['worldbook', 'world', '世界观']));
         const items = normalizeWorldbookItems(pickArrayByKeys(r, ['items', 'item', '物品', '条目']));
         batchWorld = dedupeWorldbook([...world, ...items]);
@@ -513,7 +532,7 @@ export async function runPipeline(config, send) {
         // 因为"抽不到"通常是分类判断太严，不是原文没有设定。
         if (world.length < 2) {
           try {
-            const r2 = await llm.chatJSON(S.STEP_5_WORLDBOOK_LOOSE, batchWorldProbe, 'step5');
+            const r2 = await llm.chatJSON(promptWorldbookLoose, batchWorldProbe, 'step5');
             const retry = normalizeWorldbookItems(pickArrayByKeys(r2, ['worldbook', 'world', '世界观', 'items']));
             if (retry.length > world.length) batchWorld = dedupeWorldbook([...retry, ...items]);
           } catch { /* 宽松重试失败就保留原结果 */ }
@@ -523,11 +542,11 @@ export async function runPipeline(config, send) {
       }
     } else {
       try {
-        const r = await llm.chatJSON(S.STEP_5_WORLDBOOK, batchWorldProbe, 'step5');
+        const r = await llm.chatJSON(promptWorldbook, batchWorldProbe, 'step5');
         batchWorld = normalizeWorldbookItems(asArray(r));
         if (batchWorld.length < 2) {
           try {
-            const r2 = await llm.chatJSON(S.STEP_5_WORLDBOOK_LOOSE, batchWorldProbe, 'step5');
+            const r2 = await llm.chatJSON(promptWorldbookLoose, batchWorldProbe, 'step5');
             const retry = normalizeWorldbookItems(asArray(r2));
             if (retry.length > batchWorld.length) batchWorld = retry;
           } catch { /* 宽松重试失败就保留原结果 */ }
@@ -831,7 +850,7 @@ export async function runPipeline(config, send) {
     log('WARN', '各批都没抽到世界观条目，退回全文分层采样重试一次');
     try {
       const probeText = sampleAcrossText(text, worldProbeChars);
-      const r = await llm.chatJSON(S.STEP_5_WORLDBOOK_LOOSE, probeText, 'step5');
+      const r = await llm.chatJSON(promptWorldbookLoose, probeText, 'step5');
       worldbookItems = normalizeWorldbookItems(asArray(r));
       log('Step 5', `全文采样兜底拿到 ${worldbookItems.length} 条`);
     } catch (e) {
@@ -945,9 +964,9 @@ export async function runPipeline(config, send) {
     // 分层决定档案写多详细（TIER_DETAIL）：路人NPC 只要身份与出处，
     // 让模型把笔墨花在主要NPC 上 —— 一条 1500 字的路人档案既浪费 token
     // 又会在世界书里抢注意力。
-    const detail = TIER_DETAIL[r.tier] || TIER_DETAIL['次要NPC'];
+    const detail = tierDetail(r.tier, detailLevel);
     const item = await llm.chatJSON(
-      S.STEP_5_CHARACTER,
+      promptChar,
       `角色名：${r.name}\n`
       + `已知称呼：${[r.name, ...r.aliases].join('、')}\n`
       + `剧情分层：${detail.label}（出现在 ${r.storyChapters} 章，约全书 ${Math.round((r.storyRatio || 0) * 100)}%）\n`
@@ -967,13 +986,13 @@ export async function runPipeline(config, send) {
    */
   const fetchProfileGroup = async (group) => {
     const lines = group.map(r => {
-      const detail = TIER_DETAIL[r.tier] || TIER_DETAIL['次要NPC'];
+      const detail = tierDetail(r.tier, detailLevel);
       return `- ${r.name}｜已知称呼：${[r.name, ...r.aliases].join('、')}`
         + `｜剧情分层：${detail.label}（出现在 ${r.storyChapters} 章，约全书 ${Math.round((r.storyRatio || 0) * 100)}%）`
         + `｜本档要求：${detail.fields}`;
     }).join('\n');
     const raw = await llm.chatJSON(
-      S.STEP_5_CHARACTER_BATCH,
+      promptCharBatch,
       `角色清单（共 ${group.length} 个，每个都要写）：\n${lines}\n\n原文节选：\n${probe}`,
       'step5'
     );
@@ -1303,6 +1322,8 @@ export async function runPipeline(config, send) {
     storylines,
     // 原著剧情简介：常驻参考条目
     synopsis,
+    // 完整版把概要上限放宽（基础版沿用 1200）
+    synopsisMaxChars,
   });
   const b1 = YAML.stringify(variables);
   const b2 = generateB2(variables);
@@ -1414,6 +1435,8 @@ export async function runPipeline(config, send) {
     protagonist: userMode.protagonistName || null,
     userModeAuto: !!userMode.autoDetected,
     wellKnown: !!popularity.wellKnown,
+    /** 生成档位：basic（默认）/ full —— 事后核对 token 花在哪、卡为何更细 */
+    detailLevel,
     counts: {
       chars: text.length,
       chapters: chunks.length,
@@ -2945,7 +2968,7 @@ export function dayEntryKeys(group, { protagonist = '' } = {}) {
  */
 export const SYNOPSIS_MAX_CHARS = 1200;
 
-export function assembleWorldbook(timeline, events, characters, worldbookItems, { title, eventContents, protagonist = '', storylines = {}, synopsis = '' } = {}) {
+export function assembleWorldbook(timeline, events, characters, worldbookItems, { title, eventContents, protagonist = '', storylines = {}, synopsis = '', synopsisMaxChars = SYNOPSIS_MAX_CHARS } = {}) {
   const entries = [];
 
   entries.push({
@@ -2968,7 +2991,7 @@ export function assembleWorldbook(timeline, events, characters, worldbookItems, 
    * 这里再兜一道长度上限，防止模型超写把正文预算挤掉。
    */
   if (synopsis) {
-    const body = String(synopsis).trim().slice(0, SYNOPSIS_MAX_CHARS);
+    const body = String(synopsis).trim().slice(0, Math.max(200, Number(synopsisMaxChars) || SYNOPSIS_MAX_CHARS));
     entries.push({
       id: entries.length, keys: [], comment: '[synopsis]',
       content: `【原著剧情简介】\n${body}`,

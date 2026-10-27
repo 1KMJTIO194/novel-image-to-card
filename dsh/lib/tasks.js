@@ -100,6 +100,8 @@ export async function startGenerate(job, {
   novelText = '', novelPath = null, imagePaths = [],
   baseUrl, apiKey, model, title, userMode = 'auto', outputMode = 'card',
   chapterRange = 'all', limits = null, preset = null,
+  // 生成档位：basic（默认）/ full（更细、更耗 token）
+  detailLevel = 'basic',
   // 高级项，与本地版同名同义
   options = {},
 }) {
@@ -141,6 +143,8 @@ export async function startGenerate(job, {
     signal: job.controller.signal,
     isPaused: () => job.paused === true,
     resumeBatches: false,
+    // 生成档位（pipeline 内部按档位追加要求）
+    detailLevel,
     ...options,
   };
   return runPipeline(config, job.emit);
@@ -196,6 +200,8 @@ export async function startImageCard(job, {
   imagePaths, title, hint = '', wantWorldbook = true,
   baseUrl, apiKey, model, preset = null,
   batchSize = undefined, concurrency = undefined,
+  // 生成档位：basic（默认）/ full（更细、更耗 token）
+  detailLevel = 'basic',
 }) {
   const {
     extractCharactersFromImages, buildCardFromExtraction, writeImageCardOutputs, summarizeCard,
@@ -248,6 +254,8 @@ export async function startImageCard(job, {
       llm: summaryLlm,
       profiles: vision.profiles,
       hint: String(hint || '').trim() || undefined,
+      // 档位：基础版省 token / 完整版写更细
+      detailLevel,
       send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
     });
     if (settingSummary) {
@@ -272,7 +280,8 @@ export async function startImageCard(job, {
           summary: settingSummary,
           images: imagePaths.map((p, i) => ({ index: i, path: p })),
           profiles: vision.profiles,
-          max: 3,
+          // 档位决定精修人数与每人看图数
+          detailLevel,
           send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
         });
         if (refined.refined.length) {

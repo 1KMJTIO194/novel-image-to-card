@@ -31,6 +31,7 @@ import {
 } from './src/image_card.js';
 import { extractCardSummary } from './src/image_summary.js';
 import { refineMainAppearance } from './src/image_detail.js';
+import { normalizeDetailLevel } from './src/detail_level.js';
 import { summarizeAugment, summarizeGenerate, renderSummaryMarkdown } from './src/summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -355,6 +356,8 @@ app.post(
         isPaused: () => job.paused === true,
         // 断点续跑：复用了旧目录时才允许读回已完成的批次
         resumeBatches: !!resumeTaskId,
+        // 生成档位：基础版（默认）/ 完整版（人物与世界观写更细，token 更高）
+        detailLevel: normalizeDetailLevel(req.body?.detailLevel ?? options.detailLevel),
         ...options,
       };
 
@@ -1022,6 +1025,15 @@ app.post(
       let opts = {};
       try { opts = JSON.parse(options || '{}'); } catch {}
 
+      /**
+       * 生成档位：基础版（默认，token 省）/ 完整版（更细）。
+       * 前端可以直接发 `detailLevel`，也允许放进 options 里。
+       */
+      const detailLevel = normalizeDetailLevel(req.body?.detailLevel ?? opts.detailLevel);
+      if (detailLevel === 'full') {
+        send('progress', { step: 'Init', msg: '生成档位：完整版（人物/世界观/概况都会写得更细，token 消耗更高）', ts: Date.now() });
+      }
+
       let preset = null;
       if (presetRaw) {
         const v = validatePreset(presetRaw);
@@ -1160,6 +1172,8 @@ app.post(
           llm: summaryLlm,
           profiles: vision.profiles,
           hint: String(hint || '').trim() || undefined,
+          // 档位：基础版省 token / 完整版写更细
+          detailLevel,
           send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
         });
       } catch (e) {
@@ -1199,7 +1213,9 @@ app.post(
               summary: settingSummary,
               images: localImages.map((p, i) => ({ index: i, path: p })),
               profiles: vision.profiles,
-              max: Math.max(0, Math.min(5, Number(opts.detailMax) || 3)),
+              // 档位决定精修人数与每人看图数；显式给了 detailMax 则以它为准
+              detailLevel,
+              ...(opts.detailMax === undefined ? {} : { max: Math.max(0, Math.min(8, Number(opts.detailMax) || 0)) }),
               send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
             });
             if (refined.refined.length) {
@@ -1286,6 +1302,8 @@ app.post(
         // 图片可见性是否被模型确认过（false 表示模型没答 sawImage，内容是未验证的）
         visionVerified: !!vision.quality?.verified,
         sawImage: vision.sawImage,
+        // 生成档位（basic / full）—— 事后核对 token 花在哪、卡为何更细
+        detailLevel,
         tokens: { card: Math.round(sum.cardBytes / 1.6) },
         usage: {
           calls: vision.usage.calls.length,

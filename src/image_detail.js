@@ -20,6 +20,7 @@
  */
 import { stripImageFraming } from './image_summary.js';
 import { NPC_TIERS } from './tiers.js';
+import { detailPreset } from './detail_level.js';
 import * as S from './steps.js';
 
 /** 默认最多精修几个角色 */
@@ -182,8 +183,16 @@ export function mergeDetailIntoCharacter(character, detail) {
 export async function refineMainAppearance(cfg = {}) {
   const {
     llm, summary, images = [], profiles = [], send = () => {},
-    max = DEFAULT_DETAIL_MAX, imagesPerChar = DEFAULT_DETAIL_IMAGES,
+    detailLevel = 'basic',
   } = cfg;
+
+  /**
+   * 数字参数随档位走：完整版给更多主要角色做精修、每人多看几张图。
+   * 调用方显式传了 max / imagesPerChar 时以调用方为准（CLI 的 --detail-max）。
+   */
+  const preset = detailPreset(detailLevel);
+  const max = cfg.max === undefined ? preset.refineMax : cfg.max;
+  const imagesPerChar = cfg.imagesPerChar === undefined ? preset.imagesPerChar : cfg.imagesPerChar;
 
   const result = { refined: [], skipped: [] };
   if (!summary || !Array.isArray(summary.characters) || !summary.characters.length) return result;

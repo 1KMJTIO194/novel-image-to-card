@@ -219,6 +219,8 @@ export function apply(ctx) {
         wantWorldbook: fields.wantWorldbook !== false && fields.wantWorldbook !== 'false',
         batchSize: Number(fields.batchSize) || undefined,
         concurrency: Number(fields.concurrency) || undefined,
+        // 生成档位：basic（默认）/ full（更细、更耗 token）
+        detailLevel: String(fields.detailLevel || 'basic'),
         preset: null,
       }));
       return sendJson(res, 200, { taskId: job.taskId, kind });
@@ -285,6 +287,8 @@ export function apply(ctx) {
       userMode: String(fields.userMode || 'auto'),
       outputMode: String(fields.outputMode || 'card'),
       chapterRange: String(fields.chapterRange || 'all'),
+      // 生成档位：basic（默认）/ full（更细、更耗 token）
+      detailLevel: String(fields.detailLevel || 'basic'),
       preset: null,
     }));
     return sendJson(res, 200, { taskId: job.taskId, kind });

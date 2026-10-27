@@ -68,9 +68,12 @@ const title = String(args.title || path.basename(absDir)).trim();
 const hint = String(args.hint || '').trim();
 const batchSize = Number(args.batch) || DEFAULT_VISION_BATCH;
 const dryRun = !!args['dry-run'];
+/** 生成档位：默认基础版；--full 更细但更耗 token */
+const detailLevel = args.full ? 'full' : 'basic';
 
 console.log(`目录: ${absDir}`);
 console.log(`图片: ${images.length} 张（前 3 张：${images.slice(0, 3).map(p => path.basename(p)).join(', ')}）`);
+console.log(`档位: ${detailLevel === 'full' ? '完整版（更细，token 更高）' : '基础版'}`);
 console.log(`标题: ${title}`);
 
 // ---- dry-run：只报告批数与切片计划 ----
@@ -147,7 +150,7 @@ let llm = null;
 try {
   const { makeLLM } = await import(pathToFileURL(path.join(ROOT, 'src/llm.js')).href);
   llm = makeLLM({ baseUrl, apiKey, model }, null);
-  summary = await extractCardSummary({ llm, profiles: vision.profiles, hint: hint || undefined, send: onProgress });
+  summary = await extractCardSummary({ llm, profiles: vision.profiles, hint: hint || undefined, detailLevel, send: onProgress });
 } catch (e) {
   console.warn(`  总结失败（会回退到画面事实）：${e.message}`);
 }
@@ -167,7 +170,8 @@ if (summary && llm && !args['no-refine']) {
       summary,
       images: images.map((p, i) => ({ index: i, path: p })),
       profiles: vision.profiles,
-      max: Math.max(0, Math.min(5, Number(args['detail-max']) || 3)),
+      detailLevel,
+      ...(args['detail-max'] === undefined ? {} : { max: Math.max(0, Math.min(8, Number(args['detail-max']) || 0)) }),
       send: onProgress,
     });
     console.log(r.refined.length

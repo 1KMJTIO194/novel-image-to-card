@@ -130,6 +130,8 @@ window.__ModuleLoader__.load({
       const [text, setText] = useState('');
       const [strategy, setStrategy] = useState('merge');
       const [chapterRange, setChapterRange] = useState('all');
+      /** 生成档位：basic（默认，token 省）/ full（更细致，token 更多） */
+      const [detailLevel, setDetailLevel] = useState('basic');
       /** 完善指令：会拼进每个抽取步骤的 prompt */
       const [instruction, setInstruction] = useState('');
 
@@ -279,6 +281,8 @@ window.__ModuleLoader__.load({
           fd.append('model', model.trim());
           fd.append('title', title.trim() || (tab === 'augment' ? '完善后的角色卡' : 'DSH 生成的角色卡'));
           fd.append('chapterRange', chapterRange || 'all');
+          // 生成档位（完善任务忽略）
+          fd.append('detailLevel', detailLevel === 'full' ? 'full' : 'basic');
           if (tab === 'augment') {
             fd.append('strategy', strategy);
             fd.append('novelText', text);
@@ -374,6 +378,16 @@ window.__ModuleLoader__.load({
               className: 'n2c-input', value: chapterRange,
               onChange: e => setChapterRange(e.target.value), placeholder: 'all',
             }))
+          : null,
+
+        // 生成档位（图片任务与小说生成都支持；完善任务不用）
+        tab !== 'augment'
+          ? h(Field, { label: '生成档位' },
+            h('select', {
+              className: 'n2c-select', value: detailLevel, onChange: e => setDetailLevel(e.target.value),
+            },
+            h('option', { value: 'basic' }, '基础版（默认，token 少）'),
+            h('option', { value: 'full' }, '完整版（人物/世界观更细，token 更多）')))
           : null,
 
         h('div', { className: 'n2c-row' },
