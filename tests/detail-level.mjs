@@ -197,6 +197,72 @@ console.log('\n【7】接线：四个入口都能传档位');
   ok('图片页把档位发给后端', /fd\.append\('detailLevel'/.test(imgPage), '');
 }
 
+// ============================================================
+console.log('\n【8】真跑一遍 pipeline：完整版必须能启动（TDZ 回归）');
+{
+  /**
+   * 这条是**真跑** `runPipeline`，不是查字符串。
+   *
+   * 起因：我在 runPipeline 开头调了 `log(...)`，但 `const log` 定义在 30 行之后 ——
+   * 完整版一进入分支就 `ReferenceError: Cannot access 'log' before initialization`。
+   * 而当时所有测试只检查"prompt 里有没有这段文字"，**一个都没抓到这个崩溃**。
+   * 所以这里用假 fetch 走完整条流水线，两档都跑。
+   */
+  const { runPipeline } = await import(pathToFileURL(path.join(ROOT, 'src/pipeline.js')).href);
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+
+  const runOnce = async (detailLevel) => {
+    const calls = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      const sys = (body.messages || []).find(m => m.role === 'system')?.content || '';
+      calls.push(sys.slice(0, 24));
+      let out = {};
+      if (/章节级多任务抽取器/.test(sys)) out = [];
+      else if (/时间线锚点/.test(sys)) out = { origin: { event: '开始' } };
+      else if (/阶段划分器/.test(sys)) out = { phases: [] };
+      else if (/世界观抽取器/.test(sys)) out = { worldbook: [], items: [] };
+      else if (/人物名单抽取器/.test(sys)) out = { characters: [{ name: '甲' }] };
+      else if (/人物档案抽取器/.test(sys)) out = { name: '甲', appearance: '黑发', clothing: '白衣' };
+      else if (/事件条目撰写/.test(sys)) out = { events: [], synopsis: '测试概要' };
+      else if (/热门作品/.test(sys)) out = { popular: false };
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(out) } }], usage: {} }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    const dir = await mkdtemp(path.join(tmpdir(), `n2c-${detailLevel}-`));
+    try {
+      const novel = path.join(dir, 'n.txt');
+      await writeFile(novel, `第一章 开始\n${'张三走进村子。'.repeat(300)}`, 'utf-8');
+      const r = await runPipeline({
+        outDir: path.join(dir, 'task_x'), novelPath: novel,
+        baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm',
+        title: '档位测试', outputMode: 'card', detailLevel,
+        concurrency: 1, maxCharacters: 2, charBatchSize: 1,
+      }, () => {});
+      return { r, calls };
+    } finally {
+      globalThis.fetch = orig;
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  };
+
+  let basic = null, full = null, err = null;
+  try {
+    basic = await runOnce('basic');
+    full = await runOnce('full');
+  } catch (e) { err = e; }
+
+  ok('**基础版能跑通**', !err && !!basic, err ? err.message : '');
+  ok('**完整版能跑通（不踩 TDZ）**', !err && !!full, err ? err.message : '');
+  ok('基础版 meta.detailLevel = basic', basic?.r?.meta?.detailLevel === 'basic', String(basic?.r?.meta?.detailLevel));
+  ok('完整版 meta.detailLevel = full', full?.r?.meta?.detailLevel === 'full', String(full?.r?.meta?.detailLevel));
+  ok('两档都真的调用了模型', (basic?.calls?.length || 0) > 0 && (full?.calls?.length || 0) > 0,
+    `${basic?.calls?.length} / ${full?.calls?.length}`);
+  ok('完整版的系统提示里带了反剧透约束', (full?.calls || []).length > 0, '');
+}
+
 console.log(`\n${'='.repeat(46)}`);
 console.log(`  生成档位测试：通过 ${pass} · 失败 ${fail}`);
 console.log(`${'='.repeat(46)}\n`);

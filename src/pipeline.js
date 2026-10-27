@@ -122,9 +122,19 @@ export async function runPipeline(config, send) {
   const promptWorldbookItems = withDetailRules(S.STEP_5_WORLDBOOK_ITEMS, detailLevel, 'worldbook');
   const promptWorldbookLoose = withDetailRules(S.STEP_5_WORLDBOOK_LOOSE, detailLevel, 'worldbook');
   const synopsisMaxChars = detail.synopsisMaxChars;
-  if (detailLevel === 'full') {
-    log('Init', '生成档位：完整版（人物档案更细 / 世界观更细 / 概要更长，token 消耗更高）');
-  }
+  /**
+   * ⚠️ 这里**不能**调 `log(...)`。
+   *
+   * `const log` 定义在后面（约 30 行之后），提前调用会踩 TDZ：
+   * `ReferenceError: Cannot access 'log' before initialization` ——
+   * 而且只在完整版触发（基础版不进这个分支），很容易漏测。
+   * 实测完整版整条流水线直接崩在起跑线，就是这条。
+   *
+   * 所以只在这里算好标记，等 `log` 定义之后再打。
+   */
+  const logLevelBanner = detailLevel === 'full'
+    ? '生成档位：完整版（人物档案更细 / 世界观更细 / 概要更长，token 消耗更高）'
+    : '';
 
   // 分批参数（10 章 / 3 万字，先到者为准；都可在设置里改）
   const batchOpts = {
@@ -168,6 +178,8 @@ export async function runPipeline(config, send) {
   } else {
     log('Init', '未使用预设，按内置 prompt 抽取');
   }
+  // 档位横幅（必须等 log 定义之后再打，见 logLevelBanner 处的注释）
+  if (logLevelBanner) log('Init', logLevelBanner);
 
   /** 协作式取消：每个阶段开始前检查一次 */
   const checkAbort = () => {

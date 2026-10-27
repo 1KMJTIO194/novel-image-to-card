@@ -195,6 +195,7 @@ const written = await writeImageCardOutputs(outDir, result, {
     durationMs: Date.now() - t0,
     model, baseUrl,
     imageCount: images.length,
+    detailLevel,
     hint: hint || null,
     counts: {
       images: images.length, characters: sum.characters,
