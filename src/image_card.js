@@ -30,6 +30,7 @@ import { generateStatusbar, THEMES } from './step75_statusbar.js';
 import { summarizeGenerate, renderSummaryMarkdown } from './summary.js';
 import { normalizeTier } from './tiers.js';
 import { normalizeContentMode, isAdultMode, stripAdultFieldsFromYaml } from './content_mode.js';
+import { normalizeCardFormat, isPlainCard, makePlainCard } from './card_format.js';
 import { sliceAllForVision } from './image_slice.js';
 import {
   renderSettingsYaml, worldbookFromSummary, cardFieldsFromSummary, openerFromSummary,
@@ -1155,6 +1156,8 @@ export async function buildCardFromExtraction(cfg = {}) {
   const useSummary = !!summary && Array.isArray(summary.characters) && summary.characters.length > 0;
   /** 角色卡版本：普通版（默认，不含成人内容）/ 成人版 */
   const contentMode = normalizeContentMode(cfg.contentMode ?? summary?.contentMode);
+  /** 角色卡格式：enhanced（默认，含美化与变量）/ plain（普通卡，都无） */
+  const cardFormat = normalizeCardFormat(cfg.cardFormat ?? summary?.cardFormat);
 
   // ---------- 1. 人物条目 ----------
   /**
@@ -1307,12 +1310,18 @@ export async function buildCardFromExtraction(cfg = {}) {
     ...profiles.map(p => p.scene || ''),
     title,
   ].filter(Boolean).join(' ');
-  const statusbar = await generateStatusbar({
-    variables,
-    genre: genreHint,
-    worldName: title,
-    characterName: protagonistName,
-  });
+  /**
+   * 普通卡（无美化、无变量）：不生成状态栏。
+   * 状态栏是这里唯一一次**额外** LLM 调用，跳过它也能省一次请求。
+   */
+  const statusbar = isPlainCard(cardFormat)
+    ? null
+    : await generateStatusbar({
+      variables,
+      genre: genreHint,
+      worldName: title,
+      characterName: protagonistName,
+    });
 
   // ---------- 6. 完整卡字段 ----------
   const tags = [...new Set([
@@ -1344,7 +1353,7 @@ export async function buildCardFromExtraction(cfg = {}) {
     };
 
   // ---------- 7. 组装完整卡 ----------
-  const card = assembleCharacterCard({
+  let card = assembleCharacterCard({
     timeline, events, characters, worldbook: worldbookItems,
     variables, phasesWithDeltas, userMode, cardFields,
     worldbookName: worldbook.name,
@@ -1352,6 +1361,13 @@ export async function buildCardFromExtraction(cfg = {}) {
     storylines,
     synopsis: '',
   });
+  /**
+   * 普通卡：摘掉美化与变量（与小说路径用同一个函数，保证两条件子集一致）。
+   * 这里必须在 `assembleCharacterCard` 之后做 —— 完整卡组装只有一条路径。
+   */
+  if (isPlainCard(cardFormat)) {
+    card = makePlainCard(card);
+  }
 
   return {
     card,
@@ -1364,6 +1380,8 @@ export async function buildCardFromExtraction(cfg = {}) {
     worldbookName: worldbook.name,
     variables, statusbar, characters, events, timeline, phases: phasesWithDeltas,
     cardFields, genreHint,
+    /** 角色卡版本与格式：落盘/README/汇总都要按它分支 */
+    contentMode, cardFormat,
     /** 设定总结（无总结时为 null），落盘成 card_summary.json 便于核对 */
     cardSummary: summary,
   };
@@ -1469,11 +1487,22 @@ export async function writeImageCardOutputs(outDir, result, extra = {}) {
 
   await put('character_card.json', j(result.card));
   await put('characters.json', j(result.characters));
-  await put('variables.json', j(result.variables));
-  await put('worldbook.json', j({ entries: result.worldbook }));
-  await put('statusbar.json', j(result.statusbar.statusbar));
-  await put('regex_scripts.json', j(result.statusbar.regexScripts));
-  await put('statusbar_preview.html', makeStatusbarPreview(result.statusbar));
+  /**
+   * 普通卡（无美化、无变量）：
+   *   · 不写 variables.json —— 卡里没有变量树，这份文件只会误导用户以为能编辑变量
+   *   · 不写 statusbar.json / regex_scripts.json / statusbar_preview.html —— 没有美化
+   * 保留 worldbook.json（检视用，与卡内条目一致）。
+   */
+  const plain = isPlainCard(result.cardFormat || extra.cardFormat);
+  if (!plain) {
+    await put('variables.json', j(result.variables));
+    await put('worldbook.json', j({ entries: result.worldbook }));
+    await put('statusbar.json', j(result.statusbar.statusbar));
+    await put('regex_scripts.json', j(result.statusbar.regexScripts));
+    await put('statusbar_preview.html', makeStatusbarPreview(result.statusbar));
+  } else {
+    await put('worldbook.json', j({ entries: result.worldbook }));
+  }
   if (extra.vision) await put('vision.json', j(extra.vision));
   /**
    * 设定总结的原始产出。
@@ -1535,7 +1564,11 @@ function buildReadme(result, extra = {}) {
   lines.push(`- 图片数量：${extra.imagePaths?.length ?? 0}`);
   lines.push(`- 识别角色：${result.characters.length} 人（${result.characters.map(c => c.name).join('、')}）`);
   lines.push(`- 世界书条目：${result.worldbook.length} 条`);
-  lines.push(`- 状态栏主题：${result.statusbar.statusbar.theme}`);
+  lines.push(
+    isPlainCard(result.cardFormat || extra.cardFormat)
+      ? '- 角色卡格式：**普通卡**（无美化、无变量，导入即用，不需要任何扩展）'
+      : `- 状态栏主题：${result.statusbar.statusbar.theme}`,
+  );
   lines.push('');
   lines.push('## 重要说明');
   lines.push('');

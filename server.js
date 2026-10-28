@@ -33,6 +33,7 @@ import { extractCardSummary } from './src/image_summary.js';
 import { refineMainAppearance } from './src/image_detail.js';
 import { normalizeDetailLevel } from './src/detail_level.js';
 import { normalizeContentMode } from './src/content_mode.js';
+import { normalizeCardFormat } from './src/card_format.js';
 import { summarizeAugment, summarizeGenerate, renderSummaryMarkdown } from './src/summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -361,6 +362,8 @@ app.post(
         detailLevel: normalizeDetailLevel(req.body?.detailLevel ?? options.detailLevel),
         // 角色卡版本：普通版（默认，不含成人内容）/ 成人版
         contentMode: normalizeContentMode(req.body?.contentMode ?? options.contentMode),
+        // 角色卡格式：enhanced（默认，含美化与变量）/ plain（普通卡，都无）
+        cardFormat: normalizeCardFormat(req.body?.cardFormat ?? options.cardFormat),
         ...options,
       };
 
@@ -1050,6 +1053,19 @@ app.post(
         ts: Date.now(),
       });
 
+      /**
+       * 角色卡格式：普通卡（无美化、无变量）/ 完整卡（有美化、有变量）。
+       * 普通卡会跳过状态栏生成，卡里也不带正则与变量条目。
+       */
+      const cardFormat = normalizeCardFormat(req.body?.cardFormat ?? opts.cardFormat);
+      send('progress', {
+        step: 'Init',
+        msg: cardFormat === 'plain'
+          ? '角色卡格式：普通卡（无美化、无变量，导入即用）'
+          : '角色卡格式：完整卡（含状态栏美化与变量树）',
+        ts: Date.now(),
+      });
+
       let preset = null;
       if (presetRaw) {
         const v = validatePreset(presetRaw);
@@ -1271,6 +1287,8 @@ app.post(
         wantWorldbook: wantWorldbook !== 'false' && wantWorldbook !== false,
         // 版本：普通版会把成人字段从条目里删掉
         contentMode,
+        // 格式：普通卡会摘掉美化与变量
+        cardFormat,
       });
 
       const sum = summarizeCard(result);
@@ -1327,6 +1345,8 @@ app.post(
         detailLevel,
         // 角色卡版本（general / adult）
         contentMode,
+        // 角色卡格式（enhanced / plain）
+        cardFormat,
         tokens: { card: Math.round(sum.cardBytes / 1.6) },
         usage: {
           calls: vision.usage.calls.length,

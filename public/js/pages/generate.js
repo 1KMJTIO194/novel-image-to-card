@@ -271,6 +271,17 @@ export async function renderGenerate(mount, params) {
     el('option', { value: 'general', selected: true }, '普通版（默认，不含成人内容）'),
     el('option', { value: 'adult' }, '成人版（完整包含成人内容）'));
 
+  /**
+   * 角色卡格式：普通卡（无美化、无变量）/ 完整卡（有美化、有变量）。
+   *
+   * 默认完整卡（保持旧行为）。普通卡产出的是**不需要任何扩展**的纯 ST 卡：
+   * 没有状态栏与 7 条正则（不需要「酒馆助手」）、没有 MVU 变量树
+   * （不需要「MVU」框架），导入即用。
+   */
+  const cardFormatSelect = el('select', { id: 'f-card-format', name: 'cardFormat' },
+    el('option', { value: 'enhanced', selected: true }, '完整卡（默认，含状态栏美化与变量树）'),
+    el('option', { value: 'plain' }, '普通卡（无美化、无变量，导入即用）'));
+
   const preview = el('div', { class: 'hint', style: { marginTop: '8px' } });
 
   /** 记住选中的文件；切页回来时用它继续（input.files 无法回填） */
@@ -527,6 +538,15 @@ export async function renderGenerate(mount, params) {
       hint: '普通版：不含任何成人内容，成人字段整段省略。成人版：完整包含成人内容'
         + '（erotic_abilities / 私处细节描写 写具体）。成人版要求出场角色均为成年人；'
         + '资料显示未成年时不会写成人内容。',
+    }),
+    field({
+      label: '角色卡格式',
+      control: cardFormatSelect,
+      id: 'f-card-format',
+      name: 'cardFormat',
+      hint: '完整卡：带状态栏美化（HTML 面板 + 7 条正则）与变量树（MVU），'
+        + '需要安装「酒馆助手」与「MVU」扩展。普通卡：都没有，纯 ST 原生字段 + 世界书，'
+        + '导入即用，也不需要那两扩展。',
     }),
   );
 
@@ -1337,6 +1357,8 @@ export async function renderGenerate(mount, params) {
     fd.append('detailLevel', levelSelect.value === 'full' ? 'full' : 'basic');
     // 角色卡版本：general（默认）/ adult
     fd.append('contentMode', contentModeSelect.value === 'adult' ? 'adult' : 'general');
+    // 角色卡格式：enhanced（默认）/ plain（无美化、无变量）
+    fd.append('cardFormat', cardFormatSelect.value === 'plain' ? 'plain' : 'enhanced');
     fd.append('limits', JSON.stringify(state.config.limits));
     if (preset) fd.append('preset', JSON.stringify(preset));
     fd.append('options', JSON.stringify({

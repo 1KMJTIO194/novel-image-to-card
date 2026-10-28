@@ -75,11 +75,17 @@ const detailLevel = args.full ? 'full' : 'basic';
  * 默认必须是普通版 —— 不能让用户不知情就产出成人内容。
  */
 const contentMode = args.adult ? 'adult' : 'general';
+/**
+ * 角色卡格式：默认完整卡（含美化与变量）；--plain 产普通卡（都无，导入即用）。
+ * 普通卡还会省掉一次状态栏 LLM 调用。
+ */
+const cardFormat = args.plain ? 'plain' : 'enhanced';
 
 console.log(`目录: ${absDir}`);
 console.log(`图片: ${images.length} 张（前 3 张：${images.slice(0, 3).map(p => path.basename(p)).join(', ')}）`);
 console.log(`档位: ${detailLevel === 'full' ? '完整版（更细，token 更高）' : '基础版'}`);
 console.log(`版本: ${contentMode === 'adult' ? '成人版（完整包含成人内容；出场角色须成年）' : '普通版（不含成人内容）'}`);
+console.log(`格式: ${cardFormat === 'plain' ? '普通卡（无美化、无变量，导入即用）' : '完整卡（含状态栏美化与变量树）'}`);
 console.log(`标题: ${title}`);
 
 // ---- dry-run：只报告批数与切片计划 ----
@@ -190,7 +196,7 @@ if (summary && llm && !args['no-refine']) {
 }
 
 console.log('\n=== 3/3 装配 + 落盘 ===');
-const result = await buildCardFromExtraction({ profiles: vision.profiles, title, summary, wantWorldbook: true, contentMode });
+const result = await buildCardFromExtraction({ profiles: vision.profiles, title, summary, wantWorldbook: true, contentMode, cardFormat });
 const sum = summarizeCard(result);
 const written = await writeImageCardOutputs(outDir, result, {
   imagePaths: images,
@@ -204,6 +210,7 @@ const written = await writeImageCardOutputs(outDir, result, {
     imageCount: images.length,
     detailLevel,
     contentMode,
+    cardFormat,
     hint: hint || null,
     counts: {
       images: images.length, characters: sum.characters,

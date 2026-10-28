@@ -137,6 +137,11 @@ window.__ModuleLoader__.load({
        * 默认必须是普通版 —— 不能让用户不知情就生成成人内容。
        */
       const [contentMode, setContentMode] = useState('general');
+      /**
+       * 角色卡格式：enhanced（默认，含状态栏美化与变量树）/ plain（普通卡，都无）。
+       * 默认保持完整卡，与旧行为一致。
+       */
+      const [cardFormat, setCardFormat] = useState('enhanced');
       /** 完善指令：会拼进每个抽取步骤的 prompt */
       const [instruction, setInstruction] = useState('');
 
@@ -290,6 +295,8 @@ window.__ModuleLoader__.load({
           fd.append('detailLevel', detailLevel === 'full' ? 'full' : 'basic');
           // 角色卡版本（完善任务忽略：完善是改用户已有的卡，不该改它的性质）
           fd.append('contentMode', contentMode === 'adult' ? 'adult' : 'general');
+          // 角色卡格式（同样的理由，完善任务忽略）
+          fd.append('cardFormat', cardFormat === 'plain' ? 'plain' : 'enhanced');
           if (tab === 'augment') {
             fd.append('strategy', strategy);
             fd.append('novelText', text);
@@ -408,6 +415,19 @@ window.__ModuleLoader__.load({
               h('option', { value: 'adult' }, '成人版（完整包含成人内容）')),
               h('div', { className: 'n2c-hint' },
                 '成人版要求出场角色均为成年人；资料显示未成年时不会写成人内容。')))
+          : null,
+
+        // 角色卡格式（普通卡无美化无变量；完善任务不改卡性质，故不显示）
+        tab !== 'augment'
+          ? h(Field, { label: '角色卡格式' },
+            h('div', { className: 'n2c-col' },
+              h('select', {
+                className: 'n2c-select', value: cardFormat, onChange: e => setCardFormat(e.target.value),
+              },
+              h('option', { value: 'enhanced' }, '完整卡（默认，含状态栏美化与变量树）'),
+              h('option', { value: 'plain' }, '普通卡（无美化、无变量，导入即用）')),
+              h('div', { className: 'n2c-hint' },
+                '普通卡不需要「酒馆助手」与「MVU」扩展；完整卡带状态面板与变量推进。')))
           : null,
 
         h('div', { className: 'n2c-row' },

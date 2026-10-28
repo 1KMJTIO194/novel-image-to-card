@@ -181,8 +181,13 @@ console.log('\n【6】接线：小说 / 图片 / 插件 / CLI / 两个页面');
 
   ok('server 小说接口传版本', /contentMode: normalizeContentMode\(req\.body\?\.contentMode/.test(srv), '');
   ok('server 图片接口传版本给总结', /contentMode,/.test(srv), '');
-  ok('server 图片 meta 记录版本', /contentMode,\n\s*tokens:/.test(srv), '');
-  ok('server 图片装配传版本', /contentMode,\n\s*\}\);/.test(srv), '');
+  /**
+   * 这两条**不要绑死相邻行**：后来又插了 cardFormat，用 `contentMode,\n\s*tokens:`
+   * 这种"紧邻下一行"的断言就会假失败（已踩）。
+   * 改成认注释标签 + 变量，位置无关。
+   */
+  ok('server 图片 meta 记录版本', /角色卡版本（general \/ adult）\n\s*contentMode,/.test(srv), '');
+  ok('server 图片装配传版本', /\/\/ 格式：普通卡会摘掉美化与变量\n\s*cardFormat,/.test(srv), '');
 
   ok('插件任务层支持版本', /contentMode = 'general'/.test(plug), '');
   ok('插件路由读取 fields.contentMode', /contentMode: String\(fields\.contentMode/.test(plugIdx), '');

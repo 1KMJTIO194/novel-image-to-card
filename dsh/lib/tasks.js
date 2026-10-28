@@ -104,6 +104,8 @@ export async function startGenerate(job, {
   detailLevel = 'basic',
   // 角色卡版本：general（默认，不含成人内容）/ adult
   contentMode = 'general',
+  // 角色卡格式：enhanced（默认，含美化与变量）/ plain（普通卡，都无）
+  cardFormat = 'enhanced',
   // 高级项，与本地版同名同义
   options = {},
 }) {
@@ -149,6 +151,8 @@ export async function startGenerate(job, {
     detailLevel,
     // 角色卡版本（pipeline 内部按版本追加规则 + 删成人字段）
     contentMode,
+    // 角色卡格式（plain 会跳过状态栏、摘掉美化与变量）
+    cardFormat,
     ...options,
   };
   return runPipeline(config, job.emit);
@@ -208,6 +212,8 @@ export async function startImageCard(job, {
   detailLevel = 'basic',
   // 角色卡版本：general（默认，不含成人内容）/ adult
   contentMode = 'general',
+  // 角色卡格式：enhanced（默认，含美化与变量）/ plain（普通卡，都无）
+  cardFormat = 'enhanced',
 }) {
   const {
     extractCharactersFromImages, buildCardFromExtraction, writeImageCardOutputs, summarizeCard,
@@ -330,6 +336,7 @@ export async function startImageCard(job, {
     summary: settingSummary,
     wantWorldbook: wantWorldbook !== false,
     contentMode,
+    cardFormat,
   });
   const sum = summarizeCard(result);
   emit('progress', {
@@ -347,6 +354,8 @@ export async function startImageCard(job, {
       taskId: job.taskId, kind: 'image-card', title,
       createdAt: job.startedAt, model,
       imageCount: imagePaths.length,
+      // 版本与格式：事后核对"这张卡为什么没有状态栏 / 为什么有成人字段"
+      contentMode, cardFormat,
       counts: { images: imagePaths.length, characters: sum.characters, worldbook: sum.worldbook, entries: sum.entries },
       visionVerified: !!vision.quality?.verified,
       sawImage: vision.sawImage,

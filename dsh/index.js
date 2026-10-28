@@ -223,6 +223,8 @@ export function apply(ctx) {
         detailLevel: String(fields.detailLevel || 'basic'),
         // 角色卡版本：general（默认，不含成人内容）/ adult
         contentMode: String(fields.contentMode || 'general'),
+        // 角色卡格式：enhanced（默认，含美化与变量）/ plain（普通卡，都无）
+        cardFormat: String(fields.cardFormat || 'enhanced'),
         preset: null,
       }));
       return sendJson(res, 200, { taskId: job.taskId, kind });
@@ -293,6 +295,8 @@ export function apply(ctx) {
       detailLevel: String(fields.detailLevel || 'basic'),
       // 角色卡版本：general（默认，不含成人内容）/ adult
       contentMode: String(fields.contentMode || 'general'),
+      // 角色卡格式：enhanced（默认，含美化与变量）/ plain（普通卡，都无）
+      cardFormat: String(fields.cardFormat || 'enhanced'),
       preset: null,
     }));
     return sendJson(res, 200, { taskId: job.taskId, kind });

@@ -36,6 +36,7 @@ import { normalizeDetailLevel, detailPreset, withDetailRules } from './detail_le
 import {
   normalizeContentMode, withContentRules, applyContentModeToCharItem, describeContentMode,
 } from './content_mode.js';
+import { normalizeCardFormat, isPlainCard, makePlainCard, describeCardFormat } from './card_format.js';
 import { resolveDateYears, formatDate, parseChainedTime, dateTriggerToken, compareDateParts } from './dates.js';
 
 // 分层常量从 src/tiers.js 引入；这里再导出一次，方便老调用方与测试按原路径取用
@@ -129,6 +130,15 @@ export async function runPipeline(config, send) {
    *      模型经常无视"不要写"的指令，只靠 prompt 不可靠。
    */
   const contentMode = normalizeContentMode(config.contentMode);
+
+  /**
+   * 角色卡格式：enhanced（默认，含状态栏美化 + 变量树）/ plain（普通卡，都没有）。
+   *
+   * 选 plain 时：跳过 Step 7.5 状态栏生成，卡里不带 regex_scripts / tavern_helper，
+   * 并丢掉 [initvar] / 变量更新规则 / 导演指令 / 角色阶段 等内置条目 ——
+   * 产出的是**不需要任何扩展的纯 ST 卡**。
+   */
+  const cardFormat = normalizeCardFormat(config.cardFormat);
   const promptChar = withContentRules(
     withDetailRules(S.STEP_5_CHARACTER, detailLevel, 'character'), contentMode, 'character',
   );
@@ -198,6 +208,7 @@ export async function runPipeline(config, send) {
   // 档位横幅（必须等 log 定义之后再打，见 logLevelBanner 处的注释）
   if (logLevelBanner) log('Init', logLevelBanner);
   log('Init', `角色卡版本：${describeContentMode(contentMode)}`);
+  log('Init', `角色卡格式：${describeCardFormat(cardFormat)}`);
 
   /** 协作式取消：每个阶段开始前检查一次 */
   const checkAbort = () => {
@@ -1304,8 +1315,15 @@ export async function runPipeline(config, send) {
   // 在 Step 8 之前（B5-5 输出纪律要写进占位符与正文包裹标签，
   // 完整角色卡要写入 regex_scripts）。
   checkAbort();
-  log('Step 7.5', '生成状态栏与正则体系');
   let statusbarResult = null;
+  /**
+   * 普通卡（无美化、无变量）：**整段跳过**。
+   * 状态栏与那 7 条正则就是"美化"，跳过还能省一次 LLM 调用。
+   */
+  if (isPlainCard(cardFormat)) {
+    log('Step 7.5', '普通卡：跳过状态栏与正则（无美化、无变量）');
+  } else {
+  log('Step 7.5', '生成状态栏与正则体系');
   try {
     // 本项目没有 genre 字段，用 tags + 作品名拼一个类型串供主题匹配
     const genreHint = [
@@ -1331,6 +1349,7 @@ export async function runPipeline(config, send) {
     // 但绝不能静默 —— 没有状态栏时 B5-5 也不会写占位符，用户必须知道原因。
     log('WARN', `状态栏生成失败，本次不产出状态栏与正则：${e.message}`);
     statusbarResult = null;
+  }
   }
 
   // ===== Step 8 组装 =====
@@ -1424,10 +1443,20 @@ export async function runPipeline(config, send) {
       // 原著剧情简介（常驻参考条目）
       synopsis,
     });
+    /**
+     * 普通卡：把美化与变量从卡里摘掉。
+     * 这里做（而不是让 assembleCharacterCard 分叉）是为了让"完整卡"的组装逻辑
+     * 保持单一路径 —— 普通卡只是它的一个**严格子集**，不会随两边改动而漂移。
+     */
+    if (isPlainCard(cardFormat)) {
+      characterCard = makePlainCard(characterCard);
+      log('Step 8.5', '普通卡：已移除状态栏正则、MVU 脚本与变量/导演类条目');
+    }
     const cardEntries = characterCard.data.character_book.entries;
     const cardBytes = Buffer.byteLength(JSON.stringify(characterCard, null, 2), 'utf8');
+    const regexCount = characterCard.data.extensions?.regex_scripts?.length || 0;
     log('Step 8.5', `角色卡：${cardEntries.length} 条世界书条目 / `
-      + `${characterCard.data.extensions.regex_scripts.length} 条正则 / ${(cardBytes / 1024).toFixed(1)} KB`);
+      + `${regexCount} 条正则 / ${(cardBytes / 1024).toFixed(1)} KB`);
 
     /**
      * 卡装好之后**再算一次整套常驻预算**。
@@ -1474,6 +1503,8 @@ export async function runPipeline(config, send) {
     detailLevel,
     /** 角色卡版本：general（默认，不含成人内容）/ adult */
     contentMode,
+    /** 角色卡格式：enhanced（默认，含美化与变量）/ plain（都无） */
+    cardFormat,
     counts: {
       chars: text.length,
       chapters: chunks.length,
