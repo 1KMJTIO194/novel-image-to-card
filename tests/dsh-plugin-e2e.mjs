@@ -640,6 +640,72 @@ console.log('\n【8】打开产物目录（省得用户翻文件夹）');
 }
 
 // ============================================================
+console.log('\n【8b】查看角色卡的文件位置（插件重载后也要能用）');
+{
+  /**
+   * 用户要求：「插件上增加一个查看生成的角色卡的文件位置的功能」。
+   *
+   * 关键场景不是"刚跑完"（那时面板上已经有路径），而是：
+   *   · 想找**历史任务**的卡在哪
+   *   · 插件重载后内存里的 job 没了，但产物还在磁盘上
+   * 所以这个接口必须能**只凭 taskId** 在数据目录下定位，不依赖 job。
+   *
+   * 同时它仍然不能变成"打开任意路径"的洞：taskId 形态白名单 + 文件名白名单。
+   */
+  const fs = await import('node:fs/promises');
+  const root = path.resolve(path.join(tmpRoot, 'novel2card'));
+  const post = (body) => fetch(`${BASE}/novel2card/reveal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  // 手工造一个任务目录（**不** createJob）：模拟"插件重载后 job 已丢失"
+  const orphanId = `task_${Date.now()}`;
+  const orphanDir = path.join(root, 'output', orphanId);
+  await fs.mkdir(orphanDir, { recursive: true });
+  await fs.writeFile(path.join(orphanDir, 'character_card.json'), '{"spec":"chara_card_v3"}', 'utf-8');
+
+  const r1 = await post({ taskId: orphanId });
+  const j1 = await r1.json();
+  ok('内存里没有 job 也能按 taskId 打开目录', r1.status === 200,
+    `${r1.status} ${JSON.stringify(j1).slice(0, 140)}`);
+  ok('返回的目录就是那个任务目录', typeof j1.outDir === 'string' && j1.outDir.endsWith(orphanId),
+    String(j1.outDir));
+
+  const r2 = await post({ taskId: orphanId, name: 'character_card.json' });
+  const j2 = await r2.json();
+  ok('定位角色卡文件 → 200', r2.status === 200, `${r2.status} ${JSON.stringify(j2).slice(0, 140)}`);
+  ok('返回卡片文件完整路径', typeof j2.filePath === 'string' && j2.filePath.endsWith('character_card.json'),
+    String(j2.filePath));
+  ok('同时返回所在目录', typeof j2.outDir === 'string' && j2.outDir.endsWith(orphanId), String(j2.outDir));
+
+  // 安全：文件名白名单 + 不能穿出任务目录
+  // （注意：`xxx.json` 这种**形态合法**的名字会走到 existsSync，回 404 —— 这是对的；
+  //   这里只挑形态本身非法的）
+  for (const bad of ['../secret.json', '..\\secret.json', 'sub/character_card.json', 'a b.json', 'char*.json']) {
+    const r = await post({ taskId: orphanId, name: bad });
+    ok(`非法文件名被拒：${bad.slice(0, 24)}`, r.status === 400 || r.status === 403, String(r.status));
+  }
+  const missing = await post({ taskId: orphanId, name: 'nope.json' });
+  ok('形态合法但不存在 → 404', missing.status === 404, String(missing.status));
+
+  // 安全：taskId 形态
+  const emptyId = await post({});
+  ok('缺 taskId → 400', emptyId.status === 400, String(emptyId.status));
+  for (const bad of ['../outside', 'C:\\Windows', 'task_1', 'task_abc', 'task_1793102663609/../../x']) {
+    const r = await post({ taskId: bad });
+    ok(`非法 taskId 被拒：${bad.slice(0, 24)}`, r.status === 404 || r.status === 400, String(r.status));
+  }
+
+  // 任务列表里带 outDir（面板历史任务每行要用它显示/打开位置）
+  const Tasks2 = await import(pathToFileURL(path.join(ROOT, 'dsh/lib/tasks.js')).href);
+  const listed = await Tasks2.createJob({ kind: 'generate', title: '列表位置测试', baseDir: path.join(tmpRoot, 'novel2card') });
+  const listJson = await (await fetch(`${BASE}/novel2card/tasks`)).json();
+  const row = (listJson.tasks || []).find(t => t.taskId === listed.taskId);
+  ok('任务列表每项带 outDir', !!row && typeof row.outDir === 'string' && row.outDir.endsWith(listed.taskId),
+    JSON.stringify(row || null).slice(0, 160));
+}
+
+// ============================================================
 // 收尾
 await new Promise(r => server.close(r));
 await new Promise(r => mockLLM.close(r));

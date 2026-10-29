@@ -218,6 +218,52 @@ window.__ModuleLoader__.load({
         }
       }, [outDir, pushLog]);
 
+      /**
+       * 打开某个任务的目录 / 在文件管理器里选中某个文件。
+       *
+       * 与 `openFolder` 的区别：这个可以**指定任务**（历史任务用），
+       * 也可以指定文件名（「定位角色卡」用，Windows 上是 explorer /select）。
+       * 服务端在插件重载后仍能按 taskId 找到目录，所以历史任务打不开的情况已修掉。
+       *
+       * @param {string} id 任务 id
+       * @param {string} [name] 产物文件名（可选）
+       */
+      const reveal = useCallback(async (id, name) => {
+        if (!id) return;
+        try {
+          const r = await fetch(`${API}/reveal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(name ? { taskId: id, name } : { taskId: id }),
+          });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+          const where = j.filePath || j.outDir || '';
+          pushLog(name
+            ? `已在文件管理器中定位：${where}`
+            : `已在文件管理器中打开：${where}`);
+          return j;
+        } catch (e) {
+          // 打不开不是致命错误：路径仍然显示在面板上，可以复制
+          pushLog(`打开失败（可直接复制路径）：${e.message}`);
+          return null;
+        }
+      }, [pushLog]);
+
+      /** 复制角色卡文件的完整路径（不是目录） */
+      const copyCardPath = useCallback(async () => {
+        const base = outDir || '';
+        if (!base) return;
+        const sep = base.includes('\\') ? '\\' : '/';
+        const full = `${base.replace(/[\\/]+$/, '')}${sep}character_card.json`;
+        try {
+          await navigator.clipboard.writeText(full);
+          pushLog(`已复制：${full}`);
+        } catch {
+          pushLog(`复制失败，请手动选择：${full}`);
+        }
+      }, [outDir, pushLog]);
+
       useEffect(() => {
         // 记住上次填的接口配置，省得每次重输
         try {
@@ -445,10 +491,21 @@ window.__ModuleLoader__.load({
         error ? h('div', { className: 'n2c-err' }, error) : null,
         h('div', { className: 'n2c-log', ref: logRef }, logs.join('\n') || '（等待事件…）'),
 
-        // 产物
-        artifacts.length
+        /**
+         * 产物 + 文件位置。
+         *
+         * 用户要求：「插件上增加一个查看生成的角色卡的文件位置的功能」。
+         * 所以这里除了产物列表，还固定给出：
+         *   · 产物目录（绝对路径，可选中复制）
+         *   · 📂 打开目录
+         *   · 📄 定位角色卡（在文件管理器里选中 character_card.json）
+         *   · 复制路径 / 复制卡片路径
+         * 即使产物列表还没拉回来（outDir 已知），这块也要显示 ——
+         * 之前整块被 `artifacts.length` 挡着，任务刚建或刚重载时就没有入口。
+         */
+        (artifacts.length || outDir)
           ? h('div', { className: 'n2c-card' },
-            h('div', { className: 'n2c-label' }, `产物（${artifacts.length}）`),
+            artifacts.length ? h('div', { className: 'n2c-label' }, `产物（${artifacts.length}）`) : null,
             artifacts.map((a) => {
               const dl = a.name === 'character_card.json'
                 ? h('a', {
@@ -464,10 +521,10 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'n2c-hint' }, `${(a.size / 1024).toFixed(1)} KB`),
                   dl));
             }),
-            // 产物目录：直接给出绝对路径 + 打开 / 复制（省得去翻文件夹）
+            // 产物目录：直接给出绝对路径 + 打开 / 定位 / 复制（省得去翻文件夹）
             outDir
               ? h('div', { className: 'n2c-col', style: { marginTop: 8, gap: 4 } },
-                h('div', { className: 'n2c-label' }, '产物目录'),
+                h('div', { className: 'n2c-label' }, '角色卡文件位置'),
                 h('div', {
                   className: 'n2c-hint',
                   style: {
@@ -480,18 +537,45 @@ window.__ModuleLoader__.load({
                     type: 'button', className: 'n2c-btn', onClick: openFolder,
                   }, '📂 打开目录'),
                   h('button', {
+                    type: 'button', className: 'n2c-btn', onClick: () => reveal(taskId, 'character_card.json'),
+                  }, '📄 定位角色卡'),
+                  h('button', {
                     type: 'button', className: 'n2c-btn', onClick: copyPath,
-                  }, '复制路径')))
+                  }, '复制路径'),
+                  h('button', {
+                    type: 'button', className: 'n2c-btn', onClick: copyCardPath,
+                  }, '复制卡片路径')))
               : null)
           : null,
-        // 历史任务
+        /**
+         * 历史任务：每一行都能直接看/打开**那个任务**的文件位置。
+         *
+         * 原来这里只有标题和状态 —— 用户想找"上次那张卡在哪"就得先点开任务，
+         * 而插件重载后旧任务根本点不开（内存里没有 job 了）。
+         * 现在服务端按 taskId 在数据目录下定位，旧任务也能打开。
+         */
         tasks.length > 1
           ? h('details', null,
             h('summary', { className: 'n2c-hint' }, `历史任务（${tasks.length}）`),
             h('div', { className: 'n2c-col', style: { marginTop: 6 } },
-              tasks.slice(0, 20).map(t => h('div', { key: t.taskId, className: 'n2c-file' },
-                h('span', null, `${t.title || '未命名'}`),
-                h('span', { className: 'n2c-pill' }, t.status)))))
+              tasks.slice(0, 20).map(t => h('div', {
+                key: t.taskId, className: 'n2c-file',
+                title: t.outDir || '（目录未知）',
+              },
+              h('span', { className: 'n2c-hint', style: { flex: 1 } }, `${t.title || '未命名'}`),
+              h('span', { className: 'n2c-pill' }, t.status),
+              h('button', {
+                type: 'button', className: 'n2c-btn',
+                style: { padding: '1px 6px', fontSize: 11 },
+                disabled: !t.outDir,
+                onClick: () => reveal(t.taskId),
+              }, '📂'),
+              h('button', {
+                type: 'button', className: 'n2c-btn',
+                style: { padding: '1px 6px', fontSize: 11 },
+                disabled: !t.outDir,
+                onClick: () => reveal(t.taskId, 'character_card.json'),
+              }, '📄')))))
           : null,
       );
     }

@@ -119,6 +119,34 @@ export function apply(ctx) {
   const baseDir = dataRoot();
 
   /**
+   * 任务 id 的形态：`task_<毫秒时间戳>`（见 lib/tasks.js 的 newTaskId）。
+   *
+   * 刻意用**白名单正则**而不是"过滤 ../"：只要 id 不是这个形态就一律拒绝，
+   * 路径穿越、绝对路径、UNC、`..` 全部天然挡在外面。
+   */
+  const TASK_ID_RE = /^task_\d{6,}$/;
+
+  /**
+   * 由 taskId 解析出产物目录（不依赖内存里的 job）。
+   *
+   * 为什么需要它：插件重载后 `jobs` 是空的，可是产物仍然躺在磁盘上。
+   * 用户这时想「看看刚才生成的角色卡在哪」就没有入口了 —— 原来只能回到内存任务表。
+   *
+   * @returns {string|null} 绝对路径；id 形态不合法 / 不在数据根下 / 目录不存在时返回 null
+   */
+  const resolveTaskDir = (taskId) => {
+    const id = String(taskId || '').trim();
+    if (!TASK_ID_RE.test(id)) return null;
+    const root = path.resolve(baseDir);
+    const dir = path.resolve(path.join(root, 'output', id));
+    if (!dir.startsWith(root + path.sep)) return null;
+    return existsSync(dir) ? dir : null;
+  };
+
+  /** 任务目录下允许被定位/打开的文件名（只认清单里的产物，不收任意文件名） */
+  const SAFE_FILE_RE = /^[\w.\-]+\.(json|jsonl|md|html|txt|yaml|yml|webp|png|jpe?g)$/i;
+
+  /**
    * 宿主信任栅栏。
    *
    * `connection.requestRejection(req)` 是 DSH 自己的请求校验（它知道 `--trusted-host`）。
@@ -186,7 +214,18 @@ export function apply(ctx) {
   // 2) 任务列表
   route('exact', '/novel2card/tasks', async (req, res) => {
     if (req.method !== 'GET') return sendJson(res, 405, { error: '只支持 GET' });
-    sendJson(res, 200, { tasks: listJobs() });
+    /**
+     * 顺带给出每个任务的**产物目录**。
+     *
+     * 面板上「查看角色卡的文件位置」要用它：历史任务列表里每一行都能直接
+     * 看到/打开自己那一份产物目录，而不用先点开任务。
+     * 目录解析对**内存里没有 job 的旧任务**也有效（按 taskId 形态在数据根下定位）。
+     */
+    const tasks = listJobs().map(t => ({
+      ...t,
+      outDir: (getJob(t.taskId)?.outDir) || resolveTaskDir(t.taskId) || null,
+    }));
+    sendJson(res, 200, { tasks });
   });
 
   // 3) 建任务（生成 / 完善 / 图片）
@@ -326,9 +365,15 @@ export function apply(ctx) {
    * 用户反馈：插件的数据目录在 `~/.dsh/novel2card/output/task_<时间戳>/`，
    * 手动翻文件很麻烦。这个路由让面板上的「打开目录」按钮直接把它打开。
    *
-   * ⚠️ 安全：**不接受任意路径**。目录只能来自服务端自己的任务记录
-   *（`job.outDir`），并且必须落在插件自己的数据根之下 —— 否则这个接口
-   * 就变成一个"让宿主帮任意调用者打开任意目录"的洞。
+   * 支持两种用法：
+   *   { taskId }                  打开该任务的产物目录
+   *   { taskId, name }            在文件管理器里**选中**该文件（产物清单里的名字）
+   *
+   * ⚠️ 安全：**不接受任意路径**。
+   *   · 目录只能由 `taskId` 形态（`task_<数字>`）在插件数据根下推导，或来自内存任务记录；
+   *   · 文件名只能来自产物清单形态的白名单（`SAFE_FILE_RE`），且必须在该目录内真实存在；
+   *   · 最终路径必须落在插件数据根之下。
+   * 否则这个接口就变成一个"让宿主帮任意调用者打开任意目录"的洞。
    * 写操作（POST）+ 信任栅栏已在 `route` 里统一覆盖。
    */
   route('exact', '/novel2card/reveal', async (req, res) => {
@@ -340,26 +385,80 @@ export function apply(ctx) {
     } catch (e) {
       return sendJson(res, 400, { error: `请求体不是合法 JSON：${e.message}` });
     }
-    const job = body?.taskId ? getJob(String(body.taskId)) : null;
-    if (!job) return sendJson(res, 404, { error: '任务不存在（插件重载后内存任务会丢失，但产物仍在磁盘上）' });
 
-    const outDir = path.resolve(job.outDir);
+    const wantTask = String(body?.taskId || '').trim();
+    if (!wantTask) return sendJson(res, 400, { error: '需要 taskId' });
+
+    /**
+     * 目录来源按优先级：
+     *   ① 内存里的 job（拿到它才能做"越界 → 403"这条检查）
+     *   ② 按 taskId 在数据根下推导（插件重载后仍然可用）
+     */
+    const job = getJob(wantTask);
     const root = path.resolve(baseDir);
-    // 目录必须真的在插件数据根之下（防路径穿越 / 防被改造成打开任意目录）
-    if (outDir !== root && !outDir.startsWith(root + path.sep)) {
-      return sendJson(res, 403, { error: '产物目录不在插件数据目录内，已拒绝打开' });
+    let outDir;
+    if (job) {
+      outDir = path.resolve(job.outDir);
+      if (outDir !== root && !outDir.startsWith(root + path.sep)) {
+        return sendJson(res, 403, { error: '产物目录不在插件数据目录内，已拒绝打开' });
+      }
+    } else {
+      outDir = resolveTaskDir(wantTask);
+      if (!outDir) {
+        return sendJson(res, 404, {
+          error: '任务不存在（也可能是插件重载后任务已不在内存里；'
+            + '此时产物仍在磁盘上，可按 taskId 形态在数据目录 output/ 下找到）',
+        });
+      }
     }
     if (!existsSync(outDir)) {
       return sendJson(res, 404, { error: `目录不存在：${outDir}` });
     }
 
-    /** 各平台打开目录的命令（detached，不阻塞请求） */
-    const cmd = process.platform === 'win32' ? 'explorer.exe'
-      : process.platform === 'darwin' ? 'open'
-        : 'xdg-open';
+    /**
+     * 可选：定位到具体文件（面板上「定位角色卡文件」用）。
+     * 只认白名单形态的名字，且必须是目录里的真实文件 —— 不接受子路径。
+     */
+    let target = null;
+    const wantName = String(body?.name || '').trim();
+    if (wantName) {
+      if (!SAFE_FILE_RE.test(wantName) || wantName.includes('..')) {
+        return sendJson(res, 400, { error: `文件名不合法：${wantName}` });
+      }
+      const filePath = path.resolve(path.join(outDir, wantName));
+      if (!filePath.startsWith(outDir + path.sep)) {
+        return sendJson(res, 403, { error: '文件不在该任务目录内，已拒绝' });
+      }
+      if (!existsSync(filePath)) {
+        return sendJson(res, 404, { error: `文件不存在：${filePath}`, outDir });
+      }
+      target = filePath;
+    }
+
+    /**
+     * 各平台打开命令（detached，不阻塞请求）：
+     *   Windows：有目标文件 → `explorer /select,<文件>`（打开父目录并选中它）
+     *   macOS  ：`open -R <文件>`
+     *   Linux  ：没有统一的"选中文件"，打开父目录
+     */
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    let cmd;
+    let cmdArgs;
+    if (target && isWin) {
+      cmd = 'explorer.exe';
+      // /select, 与路径**不能**分开传参，必须拼成一个参数，否则 explorer 只开默认目录
+      cmdArgs = [`/select,${target}`];
+    } else if (target && isMac) {
+      cmd = 'open';
+      cmdArgs = ['-R', target];
+    } else {
+      cmd = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
+      cmdArgs = [outDir];
+    }
     try {
       const { spawn } = await import('node:child_process');
-      const child = spawn(cmd, [outDir], { detached: true, stdio: 'ignore' });
+      const child = spawn(cmd, cmdArgs, { detached: true, stdio: 'ignore' });
       // Explorer 在新窗口打开后可能不退出，不 unref 会拖住宿主进程
       child.unref();
       // explorer.exe 即使成功也常返回非 0，所以不 await 它的退出码
@@ -368,9 +467,15 @@ export function apply(ctx) {
       return sendJson(res, 500, {
         error: `无法调用 ${cmd}（${e.message}）：可直接复制面板上显示的路径`,
         outDir,
+        ...(target ? { filePath: target } : {}),
       });
     }
-    sendJson(res, 200, { ok: true, outDir, opened: cmd });
+    sendJson(res, 200, {
+      ok: true,
+      outDir,
+      ...(target ? { filePath: target } : {}),
+      opened: cmd,
+    });
   });
 
   // 5) 事件流（SSE）

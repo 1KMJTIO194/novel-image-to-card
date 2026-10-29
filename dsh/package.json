@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-novel2card",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "小说 / 图片一键生成 SillyTavern 角色卡（DSH 插件）：世界书 + 酒馆助手预设 + 时间线 + MVU 变量树；支持完善已有卡与图片生成",

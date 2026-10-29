@@ -285,6 +285,47 @@ console.log('\n【4】客户端 bundle 在模拟宿主里实际执行');
 }
 
 // ============================================================
+console.log('\n【4b】查看角色卡文件位置（面板入口 + 服务端定位）');
+{
+  /**
+   * 用户要求：「插件上增加一个查看生成的角色卡的文件位置的功能」。
+   *
+   * 这个功能有两半，缺一半都不成立：
+   *   ① 面板上要有入口（显示绝对路径 + 打开 / 定位文件 / 复制路径）
+   *   ② 服务端要能**只凭 taskId** 定位目录 —— 否则插件重载后旧任务打不开
+   * 所以这里两半都查。
+   */
+  const clientSrc = await readFile(path.join(DSH, 'client.js'), 'utf-8');
+  const hostSrc = await readFile(path.join(DSH, 'index.js'), 'utf-8');
+
+  // ① 面板
+  ok('面板显示「角色卡文件位置」区块', /角色卡文件位置/.test(clientSrc), '');
+  ok('有「打开目录」按钮', /📂 打开目录/.test(clientSrc), '');
+  ok('有「定位角色卡」按钮（在文件管理器里选中卡片文件）',
+    /📄 定位角色卡/.test(clientSrc), '');
+  ok('有「复制路径」与「复制卡片路径」',
+    /复制路径/.test(clientSrc) && /复制卡片路径/.test(clientSrc), '');
+  ok('打开/定位都走 /reveal（不是自己拼命令）',
+    /\/reveal/.test(clientSrc) && /reveal\(taskId/.test(clientSrc), '');
+  ok('历史任务每一行都能看位置（旧任务也能打开）',
+    /reveal\(t\.taskId, 'character_card\.json'\)/.test(clientSrc), '');
+  ok('历史任务行带 outDir 提示（悬停可见路径）', /title: t\.outDir/.test(clientSrc), '');
+  ok('产物区块不再被 artifacts.length 挡死（outDir 已知就显示）',
+    /\(artifacts\.length \|\| outDir\)/.test(clientSrc), '');
+
+  // ② 服务端
+  ok('服务端有 taskId → 目录的解析函数', /const resolveTaskDir = \(taskId\)/.test(hostSrc), '');
+  ok('taskId 用白名单正则（挡住 ../ 与绝对路径）',
+    /TASK_ID_RE = \/\^task_\\d\{6,\}\$\//.test(hostSrc), '');
+  ok('文件名用白名单正则', /SAFE_FILE_RE = /.test(hostSrc), '');
+  ok('定位文件用 explorer /select（Windows 才会真的选中文件）',
+    /\/select,\$\{target\}/.test(hostSrc), '');
+  ok('macOS 用 open -R', /'-R', target/.test(hostSrc), '');
+  ok('返回 filePath（面板日志要显示定位到哪个文件）', /filePath: target/.test(hostSrc), '');
+  ok('任务列表每项带 outDir', /outDir: \(getJob\(t\.taskId\)\?\.outDir\) \|\| resolveTaskDir/.test(hostSrc), '');
+}
+
+// ============================================================
 console.log('\n【7】核心目录解析（安装位置不确定 + 中文路径）');
 {
   const L = await import(pathToFileURL(path.join(DSH, 'lib/loader.js')).href);
