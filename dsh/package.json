@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "小说 / 图片一键生成 SillyTavern 角色卡（DSH 插件）：世界书 + 酒馆助手预设 + 时间线 + MVU 变量树；支持完善已有卡与图片生成",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "author": {
     "name": "米德格拉伊",
     "url": "https://github.com/1KMJTIO194"

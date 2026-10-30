@@ -1309,7 +1309,7 @@ system/user 消息，用来断言预设的后缀确实被追加到了正确的 S
 
 ## 克隆与推送
 
-代码已按 MIT 协议开源。`.gitignore` 会排除**全部用户数据**：
+代码已按 **AGPL-3.0** 协议开源（自己用不受限制；对外分发修改版或做成在线服务需同样开源）。`.gitignore` 会排除**全部用户数据**：
 
 | 被排除 | 内容 |
 | --- | --- |
@@ -1376,7 +1376,21 @@ git ls-files | Select-String "output|uploads|_tmp-"   # 应为空
 
 ## 许可
 
-MIT License —— 详见 [LICENSE](LICENSE)。
+**GNU Affero General Public License v3.0（AGPL-3.0）** —— 全文见 [LICENSE](LICENSE)。
+
+Copyright (C) 2026 米德格拉伊（[@1KMJTIO194](https://github.com/1KMJTIO194)）
+
+| 你可以 | 你必须 |
+| --- | --- |
+| 免费使用、修改、私有部署（**自己用不受任何限制**） | 分发修改版时**同样以 AGPL-3.0 开源**并提供完整源码 |
+| 拿去研究、二次开发 | 保留版权声明与许可声明 |
+| — | **把它改成网络服务给别人用**时，也要向那些用户提供源码（AGPL 第 13 条） |
+
+> 一句话：**自己用随便用；对外分发（包括做成在线服务）必须开源**。
+> 这比 MIT 严 —— MIT 允许别人拿去闭源、商用；AGPL 不允许。
+
+历史说明：本仓库早期提交（`2b47d1b` 及之前）曾以 MIT 发布，
+那些已发出的副本仍按 MIT 有效；从本次提交起改为 AGPL-3.0。
 
 作者：**米德格拉伊**（[@1KMJTIO194](https://github.com/1KMJTIO194)）
 

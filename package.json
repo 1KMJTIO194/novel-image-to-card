@@ -3,7 +3,7 @@
   "version": "1.5.0",
   "type": "module",
   "description": "小说 / 图片一键生成 SillyTavern 角色卡：A 包世界书 + B 包酒馆助手预设，含时间线、事件压力、剧情阶段、人设增量与 MVU 变量树；支持完善已有角色卡与图片生成角色卡",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "author": {
     "name": "米德格拉伊",
     "url": "https://github.com/1KMJTIO194"
