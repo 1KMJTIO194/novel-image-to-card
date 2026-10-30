@@ -1459,7 +1459,12 @@ server.on('error', (err) => {
     } else {
       console.error(`          PORT=3001 npm start`);
     }
-    console.error(`     3. 直接指定端口：node server.js --port 3001\n`);
+    console.error(`     3. 直接指定端口：node server.js --port 3001`);
+    /**
+     * 最省事的一条：启动器会**自动往后找空闲端口**（3001…3009），
+     * 而且能认出"占用者是本项目自己"（双击了两次启动脚本的情况）。
+     */
+    console.error(`     4. 用启动器（自动找空闲端口 / 识别已在运行的实例）：npm run launch\n`);
     process.exit(1);
   }
   if (err?.code === 'EACCES') {

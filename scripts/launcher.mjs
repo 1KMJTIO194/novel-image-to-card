@@ -153,6 +153,33 @@ export function whoOwnsPort(port, { isWin = IS_WIN } = {}) {
   }
 }
 
+/**
+ * 探测某个端口上跑的是不是**我们自己的生成器**。
+ *
+ * 为什么需要：最常见的"端口被占用"其实是**用户自己双击了两次启动脚本** ——
+ * 上一次的生成器还在跑。这时最该给的提示不是"换个端口"，而是
+ * "已经在运行，直接打开浏览器"。判断依据是 `/api/system` 返回的 `cwd`
+ * 是否等于本项目根目录（别的程序不会有这个接口，更不会报出同样的路径）。
+ *
+ * @returns {Promise<object|null>} `/api/system` 的 JSON；端口没服务/不是我们时 null
+ */
+export async function probeRunningApp(port, { timeoutMs = 1200, root = ROOT } = {}) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/system`, {
+      signal: AbortSignal.timeout(Math.max(200, Number(timeoutMs) || 1200)),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (!j || j.ok !== true) return null;
+    // cwd 必须是本项目（大小写/斜杠归一后比较，Windows 上不区分大小写）
+    const same = typeof j.cwd === 'string'
+      && path.resolve(j.cwd).toLowerCase() === path.resolve(root).toLowerCase();
+    return { ...j, sameProject: same };
+  } catch {
+    return null;
+  }
+}
+
 /** 端口是否空闲 */
 export function portFree(port) {
   return new Promise((resolve) => {
@@ -161,6 +188,36 @@ export function portFree(port) {
     srv.once('listening', () => srv.close(() => resolve(true)));
     srv.listen(port, '127.0.0.1');
   });
+}
+
+/** 默认向后扫描多少个端口（3000 被占时看 3001…3009） */
+export const PORT_SCAN_RANGE = 10;
+
+/**
+ * 从 startPort 起向后找**第一个空闲端口**。
+ *
+ * 为什么不再只试一个 3001：
+ *   原来 3000 被占时启动器只问"改成 3001 行不行"，而 3001 也常被别的常驻程序占着
+ *   （实测这台机器上 3001 就有服务在监听），于是用户被卡死，只能自己去
+ *   `set PORT=3005 && npm start`。向后扫一段能让双击启动继续走下去。
+ *
+ * @param {number} startPort 起始端口（含）
+ * @param {{max?: number, isFree?: (p:number)=>Promise<boolean>, end?: number}} [opts]
+ * @returns {Promise<number|null>} 找到的端口；扫完都没有则 null
+ */
+export async function findFreePort(startPort, opts = {}) {
+  const {
+    max = PORT_SCAN_RANGE,
+    isFree = portFree,
+    end = 65535,
+  } = opts;
+  const start = Math.max(1, Math.floor(Number(startPort) || 0));
+  const limit = Math.min(Number(end) || 65535, start + Math.max(1, Number(max) || 1) - 1);
+  for (let p = start; p <= limit; p++) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await isFree(p)) return p;
+  }
+  return null;
 }
 
 /** 命令行参数解析 */
@@ -396,19 +453,48 @@ async function main() {
     blank();
     const owner = whoOwnsPort(PORT);
     if (owner) say(`  占用者：${owner}`);
+    else say('  占用者：识别不到（可能是端口转发 / 容器 / 别的用户下的进程）');
+
+    /**
+     * 先判断占用者是不是**我们自己**（多半是用户双击了两次）。
+     * 是的话最该做的不是换端口，而是直接打开那个已经在跑的界面。
+     */
+    const running = await probeRunningApp(PORT);
+    if (running?.sameProject) {
+      const url = `http://localhost:${PORT}`;
+      blank();
+      say(`  这其实就是**本项目已经在运行的生成器**（端口 ${PORT}）。`);
+      say(`  不需要再启动一个，直接打开界面即可：${url}`);
+      blank();
+      const reuse = await ask('  现在打开浏览器？(Y/n) ');
+      if (reuse === '' || /^y/i.test(reuse)) {
+        if (NO_BROWSER) say(`  已禁用浏览器启动，请手动打开：${url}`);
+        else openUrl(url);
+      }
+      exitWith(0);
+    }
+
     blank();
     say('  可能是上一次的生成器还在运行，或别的程序占用了这个端口。');
     blank();
-    const next = PORT === 3001 ? 3002 : 3001;
-    const answer = await ask(`  是否改用端口 ${next} 重试？(Y/n) `);
+
+    /**
+     * 向后扫一段找空闲端口。
+     *
+     * 原来只试一个 3001：3001 恰好也被占时就直接放弃，让用户自己 set PORT=。
+     * 现在扫 3001…3009，找到哪个就用哪个（扫描区间会打印出来，不会悄悄换端口）。
+     */
+    const from = PORT + 1;
+    const alt = await findFreePort(from, { max: PORT_SCAN_RANGE });
+    if (!alt) {
+      say(`  [错误] ${from}–${from + PORT_SCAN_RANGE - 1} 都被占用了。请手动指定空闲端口：`);
+      say(IS_WIN ? '          set PORT=3005 && npm start' : '          PORT=3005 npm start');
+      exitWith(1);
+    }
+    say(`  已自动找到空闲端口：${alt}`);
+    const answer = await ask(`  是否改用端口 ${alt} 重试？(Y/n) `);
     if (answer === '' || /^y/i.test(answer)) {
-      PORT = next;
-      if (!(await portFree(PORT))) {
-        blank();
-        say(`  [错误] 端口 ${PORT} 也不可用。请手动指定一个空闲端口：`);
-        say(IS_WIN ? `          set PORT=3005 && npm start` : `          PORT=3005 npm start`);
-        exitWith(1);
-      }
+      PORT = alt;
       say(`  改用端口 ${PORT} 启动...`);
     } else {
       blank();
@@ -485,11 +571,23 @@ export async function collectChecks({ root = ROOT, port = PORT } = {}) {
     results.push(existsSync(path.join(root, f)) ? ['OK', `存在 ${f}`] : ['FAIL', `缺少 ${f}`]);
   }
 
-  // 5. 端口
+  // 5. 端口（被占用时顺带报出"下一个可用的是哪个"，省得用户自己试）
   const free = await portFree(port);
-  results.push(free
-    ? ['OK', `端口 ${port} 可用`]
-    : ['WARN', `端口 ${port} 被占用${whoOwnsPort(port) ? `（${whoOwnsPort(port)}）` : ''}，启动时会提示换端口`]);
+  if (free) {
+    results.push(['OK', `端口 ${port} 可用`]);
+  } else {
+    const owner = whoOwnsPort(port);
+    const running = await probeRunningApp(port);
+    if (running?.sameProject) {
+      // 最常见的情况：用户双击了两次启动脚本，上一次的还在跑
+      results.push(['OK', `端口 ${port} 上就是本项目的生成器（已在运行，直接打开 http://localhost:${port} 即可）`]);
+    } else {
+      const alt = await findFreePort(port + 1, { max: PORT_SCAN_RANGE });
+      results.push(['WARN',
+        `端口 ${port} 被占用${owner ? `（${owner}）` : ''}`
+        + (alt ? `；启动时会自动改用 ${alt}` : `；${port + 1}–${port + PORT_SCAN_RANGE} 也都被占用，需手动指定端口`)]);
+    }
+  }
 
   return results;
 }

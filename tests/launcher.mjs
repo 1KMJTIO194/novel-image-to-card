@@ -263,6 +263,73 @@ async function main() {
   }
 
   // ============================================================
+  console.log('\n【E2】端口被占用时的自救：向后找空闲端口');
+  {
+    /**
+     * 用户反馈过「端口占用」。实测这台机器上 3000 被 C:\Aurabot 占着、
+     * 3001 也被别的服务占着 —— 而原来的启动器只试一个 3001，于是直接卡死。
+     * 现在改成向后扫一段，这里把扫描逻辑钉住。
+     */
+    ok('导出了扫描范围常量', typeof launcher.PORT_SCAN_RANGE === 'number' && launcher.PORT_SCAN_RANGE >= 5,
+      String(launcher.PORT_SCAN_RANGE));
+    ok('导出了 findFreePort', typeof launcher.findFreePort === 'function');
+
+    const fake = (freeFrom) => async (p) => p >= freeFrom;
+    ok('从起始端口开始找，跳过被占的', await launcher.findFreePort(3001, { max: 9, isFree: fake(3005) }) === 3005);
+    ok('起始端口就空闲时直接用它', await launcher.findFreePort(3001, { max: 9, isFree: fake(3001) }) === 3001);
+    ok('全被占用时返回 null', await launcher.findFreePort(3001, { max: 3, isFree: async () => false }) === null);
+    ok('不越过高位端口边界',
+      await launcher.findFreePort(65533, { max: 10, isFree: async (p) => p === 65534 }) === 65534);
+    ok('max 会限制扫描个数', await launcher.findFreePort(3001, { max: 2, isFree: async () => false }) === null);
+
+    // 真实探测：3097 起应当能立即拿到（该段没有服务）
+    const real = await launcher.findFreePort(3097, { max: 3 });
+    ok('真实探测能拿到空闲端口', typeof real === 'number' && real >= 3097 && real <= 3099, String(real));
+  }
+
+  // ============================================================
+  console.log('\n【E3】识别端口上是不是本项目（双击两次启动脚本的场景）');
+  {
+    /**
+     * 最常见的"端口被占用" = 用户双击了两次启动脚本。
+     * 这时启动器应当认出来并提示"已在运行，直接打开浏览器"，
+     * 而不是让用户换端口。
+     *
+     * 判据：`/api/system` 的 `cwd` 是否等于本项目根目录。
+     */
+    ok('导出了 probeRunningApp', typeof launcher.probeRunningApp === 'function');
+
+    const port = 3098;
+    const httpMod = await import('node:http');
+    const srv = httpMod.createServer((req, res) => {
+      if (req.url === '/api/system') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, cwd: ROOT, port }));
+      } else {
+        res.writeHead(404); res.end();
+      }
+    });
+    await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+    try {
+      const info = await launcher.probeRunningApp(port, { root: ROOT });
+      ok('能识别出本项目（sameProject=true）', info?.sameProject === true,
+        JSON.stringify(info));
+      ok('带回了 cwd 与端口', info?.cwd === ROOT && info?.port === port, JSON.stringify(info?.cwd));
+
+      // 换一个 root，应当识别为"不是本项目"
+      const other = await launcher.probeRunningApp(port, { root: path.join(ROOT, 'dist') });
+      ok('别的目录 → sameProject=false（不会误认成自己）', other?.sameProject === false,
+        String(other?.sameProject));
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+
+    // 没有服务时返回 null，且不能抛
+    const none = await launcher.probeRunningApp(3099, { timeoutMs: 400 });
+    ok('端口没服务时安全返回 null', none === null, String(none));
+  }
+
+  // ============================================================
   console.log('\n【F】逻辑单测：参数与版本');
   {
     ok('默认端口 3000', launcher.parseArgs([], {}).port === 3000);
