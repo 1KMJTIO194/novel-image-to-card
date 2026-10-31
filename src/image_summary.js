@@ -303,9 +303,13 @@ export async function extractCardSummary(cfg = {}) {
  *
  * @param {object} c 归一化后的 character
  * @param {object} [visual] 对应的视觉档案（补外貌用）
+ * @param {{fillBasicStats?: boolean}} [opts]
+ *   `fillBasicStats`：age / height / weight / measurements 四项**必须出现在卡里**。
+ *   只有"由资料总结出来的人物"才开（视觉-only 的路人保持省略，避免满屏占位）。
  */
-export function renderSettingsYaml(c, visual = null) {
+export function renderSettingsYaml(c, visual = null, opts = {}) {
   const v = visual || {};
+  const fillBasicStats = opts.fillBasicStats === true;
   const line = (k, val) => {
     const s = String(val || '').trim();
     return s ? `${k}: ${s.replace(/\n+/g, ' ')}` : '';
@@ -317,11 +321,32 @@ export function renderSettingsYaml(c, visual = null) {
     return `${k}: |\n${indented}`;
   };
 
+  /**
+   * 年龄 / 身高 / 体重 / 三围的渲染。
+   *
+   * 用户反馈（原话）：
+   *   「角色卡里生成的年龄身高和三围好像没出现明确的数值就不会填上去了」
+   *
+   * 原来：拿不到明确数值时整行丢弃（为了不写"未提及"占位）。
+   * 结果：卡里完全看不到这四项，人设显得不完整、也没法在 ST 里编辑补全。
+   * 现在：prompt 先要求给推断值（并标「（推断）」）；万一模型还是没给，
+   * 这里兜底写成「未提供（可自行设定）」——**字段一定在**，用户一眼知道该补什么。
+   */
+  const basicStat = (k, val) => {
+    const s = String(val || '').trim();
+    const placeholder = !s || /^(未提及|不详|未知|无法判断|未提供|无|n\/a)$/i.test(s)
+      || /^未提及/.test(s);
+    if (placeholder) {
+      return fillBasicStats ? `${k}: 未提供（可自行设定）` : '';
+    }
+    return `${k}: ${s.replace(/\n+/g, ' ')}`;
+  };
+
   const out = [];
   out.push(`name: ${String(c.name || '').trim() || '未命名'}`);
   if (c.aliases?.length) out.push(`aliases: [${c.aliases.join('、')}]`);
   if (c.gender) out.push(`gender: ${c.gender}`);
-  if (c.age) out.push(`age: ${c.age}`);
+  out.push(basicStat('age', c.age));
   /**
    * 身高/体重/三围：**带单位**才写。
    *
@@ -334,9 +359,9 @@ export function renderSettingsYaml(c, visual = null) {
     if (/未提及|不详|未知|无法判断/.test(s)) return '';
     return `${k}: ${s}`;
   };
-  out.push(unitLine('height', c.height));
-  out.push(unitLine('weight', c.weight));
-  out.push(unitLine('measurements', c.measurements));
+  out.push(fillBasicStats ? basicStat('height', c.height) : unitLine('height', c.height));
+  out.push(fillBasicStats ? basicStat('weight', c.weight) : unitLine('weight', c.weight));
+  out.push(fillBasicStats ? basicStat('measurements', c.measurements) : unitLine('measurements', c.measurements));
 
   out.push(line('identity', c.identity));
   // 外貌：优先用总结里的，没有就用画面事实补（画面事实是"看得见的"，不是"图片里"）

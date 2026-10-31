@@ -1097,7 +1097,9 @@ export function mergeSummaryCharacters(summaryChars = [], profiles = [], protago
       tier,
       role: tier,
       // 设定 YAML：外貌缺失时用画面事实补
-      content_yaml: gate(renderSettingsYaml(c, p)),
+      // fillBasicStats：总结出来的人物**必须带年龄/身高/体重/三围**（缺了写"未提供"），
+      // 纯视觉路人不开，否则每张图一个人物都多四行占位。
+      content_yaml: gate(renderSettingsYaml(c, p, { fillBasicStats: true })),
       aliases: [...new Set([...aliases, ...((p?.aliases) || [])])],
       ...(p ? { imageIndex: p.imageIndex, confidence: p.confidence } : {}),
       fromSummary: true,

@@ -415,13 +415,19 @@ async function main() {
       JSON.stringify(checks.slice(0, 3)));
     ok('没有 FAIL 项', checks.every(c => c[0] !== 'FAIL'),
       JSON.stringify(checks.filter(c => c[0] === 'FAIL')));
-    // 端口状态取决于本机此刻是否有服务在跑，两种都应被测到
+    // 端口状态取决于本机此刻是否有服务在跑，三种都应被测到
     const portCheck = checks.find(c => /端口/.test(c[1]));
     ok('端口检查有结论', !!portCheck, JSON.stringify(checks.map(c => c[1])));
     ok('端口检查结论与实际监听状态一致', await (async () => {
       const held = !(await launcher.portFree(3000));       // 3000 是否被占
       const saysBusy = /被占用/.test(portCheck[1]);
-      return held === saysBusy;
+      /**
+       * 新增第三种情况：占用者是**本项目的生成器**（恰好本机开着服务）。
+       * 这时自检给的是"端口 3000 上就是本项目的生成器（已在运行…）"，
+       * 不是"被占用" —— 但它确实是被占着，所以两种情况都算一致。
+       */
+      const saysSelf = /本项目的生成器/.test(portCheck[1]);
+      return held ? (saysBusy || saysSelf) : !(saysBusy || saysSelf);
     })(), portCheck?.[1]);
 
     // 用一个几乎不可能被占用的高位端口，验证全部 OK 的样子

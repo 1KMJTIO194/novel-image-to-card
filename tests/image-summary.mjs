@@ -193,6 +193,49 @@ console.log('\n【5】设定 YAML：不写"图片未提供"占位');
 }
 
 // ============================================================
+console.log('\n【5b】年龄/身高/体重/三围：必须出现在卡里');
+{
+  /**
+   * 用户反馈（原话）：
+   *   「角色卡里生成的年龄身高和三围好像没出现明确的数值就不会填上去了」
+   *
+   * 之前策略是"拿不到明确数值就整行不写"，结果卡里四项全缺。
+   * 现在：总结人物用 fillBasicStats 渲染 —— 有值照写，没值也写
+   * 「未提供（可自行设定）」，字段一定在；纯视觉路人不开，避免满屏占位。
+   */
+  const filled = M.renderSettingsYaml({ name: '甲', age: '20-24 岁（推断）' }, null, { fillBasicStats: true });
+  ok('总结人物：age 有值就照写', /age: 20-24 岁（推断）/.test(filled), filled);
+  ok('总结人物：height 缺失 → 显式"可自行设定"', /height: 未提供（可自行设定）/.test(filled), filled);
+  ok('总结人物：weight 缺失 → 显式', /weight: 未提供（可自行设定）/.test(filled), filled);
+  ok('总结人物：measurements 缺失 → 显式', /measurements: 未提供（可自行设定）/.test(filled), filled);
+
+  // 模型偷懒写「未提及」也要兜住
+  const lazy = M.renderSettingsYaml({
+    name: '乙', age: '未提及', height: '未提及', weight: '不详', measurements: '未知',
+  }, null, { fillBasicStats: true });
+  ok('「未提及/不详/未知」都转成"未提供（可自行设定）"',
+    (lazy.match(/未提供（可自行设定）/g) || []).length === 4, lazy);
+
+  // 有明确数值时原样保留（不能被兜底改写）
+  const real = M.renderSettingsYaml({
+    name: '丙', age: '22岁', height: '165cm', weight: '50kg', measurements: 'B88/W60/H90',
+  }, null, { fillBasicStats: true });
+  ok('明确数值原样保留',
+    /age: 22岁/.test(real) && /height: 165cm/.test(real)
+    && /weight: 50kg/.test(real) && /measurements: B88\/W60\/H90/.test(real), real);
+
+  // 纯视觉路人：不开 fillBasicStats，保持"没值就不写"
+  const visualOnly = M.renderSettingsYaml({ name: '路人' }, null, {});
+  ok('纯视觉路人不写占位（避免满屏）', !/height:/.test(visualOnly) && !/未提供/.test(visualOnly), visualOnly);
+
+  // prompt 侧也要有要求（否则模型永远不给推断值）
+  ok('图片总结 prompt 要求四项必须给值', /四项必须给值/.test(S.STEP_IMAGE_SUMMARY), '');
+  ok('图片总结 prompt 要求标「（推断）」', /（推断）/.test(S.STEP_IMAGE_SUMMARY), '');
+  ok('加载真值要求写进 prompt',
+    /有明确数值就照写/.test(S.STEP_IMAGE_SUMMARY), '');
+}
+
+// ============================================================
 console.log('\n【6】世界书与卡字段：来自总结的设定');
 {
   const summary = M.normalizeSummary(await makeMockLLM().chatJSON(S.STEP_IMAGE_SUMMARY, 'x'));
