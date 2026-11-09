@@ -31,8 +31,9 @@ import * as T from './templates.js';
 import { generateStatusbar } from './step75_statusbar.js';
 import { splitIntoBatches, createContextChain, describeBatches, DEFAULT_BATCH } from './batcher.js';
 import { mergeBatches } from './merge_batches.js';
+import { stampChapter, groupEventsBySegment, fallbackExcerpt } from './event_segments.js';
 import { NPC_TIERS, TIER_RANK, TIER_THRESHOLDS, TIER_DETAIL, LEGACY_ROLE_MAP, normalizeTier, tierDetail } from './tiers.js';
-import { normalizeDetailLevel, detailPreset, withDetailRules } from './detail_level.js';
+import { normalizeDetailLevel, detailPreset, withDetailRules, isFull } from './detail_level.js';
 import {
   normalizeContentMode, withContentRules, applyContentModeToCharItem, describeContentMode,
 } from './content_mode.js';
@@ -511,7 +512,8 @@ export async function runPipeline(config, send) {
       }, concurrency);
       for (const r of raw.filter(Boolean)) {
         mentionsByTitle.set(r.chapter, { chapter: r.chapter, mentions: r.mentions, error: r.error });
-        eventsByTitle.set(r.chapter, r.events);
+        // 给事件打上章节标记：后面"按剧情段落写事件条目"要靠它归段
+        eventsByTitle.set(r.chapter, stampChapter(r.events, r.chapter));
       }
       // 解析异常告警：两个键都空但请求成功，多半是模型没按对象形态返回
       const bothEmpty = raw.filter(r => r?.ok && !r.mentions.length && !r.events.length).length;
@@ -551,7 +553,7 @@ export async function runPipeline(config, send) {
           return { chapter: c.title, events: [], error: e.message };
         }
       }, concurrency);
-      for (const r of eRaw.filter(Boolean)) eventsByTitle.set(r.chapter, r.events);
+      for (const r of eRaw.filter(Boolean)) eventsByTitle.set(r.chapter, stampChapter(r.events, r.chapter));
     }
 
     // ---- 批内 Step 5 之一：世界观 / 物品（按批取样，而不是只抽全文一次）----
@@ -1206,37 +1208,32 @@ export async function runPipeline(config, send) {
   let synopsis = '';
   if (events.length) {
     checkAbort();
-    log('Step 5.5', `撰写事件条目（${events.length} 个）`);
-    try {
-      const payload = events.map(e => ({
-        name: e.name,
-        time: e.time || '',
-        chapter: e.chapter || '',
-        pressure: e.pressure || 'buffer',
-        canon: e.canon || '',
-        interventions: e.interventions || [],
-      }));
-      const excerpt = chunks.slice(0, 4).map(c => `${c.title}\n${c.text}`).join('\n\n').slice(0, worldProbeChars);
-      /**
-       * 合并调用（默认）：一次拿回事件条目 + 剧情简介。
-       * 两者需要的信息完全一样（事件清单 + 原文节选），拆开就是同一段原文发两遍。
-       */
-      const merged = mergeSynopsisCalls !== false;
-      const raw = await llm.chatJSON(
-        merged ? S.STEP_5_EVENT_WITH_SYNOPSIS : S.STEP_5_EVENT,
-        `事件清单：\n${JSON.stringify(payload, null, 2)}\n\n原文节选：\n${excerpt}`,
-        'step5',
-      );
-      const byName = new Map();
-      // 不合并时 raw 是数组；合并时是 {events, synopsis}
-      const rawItems = merged ? pickArrayByKeys(raw, ['events', '事件', 'items']) : asArray(raw);
-      if (merged) {
-        synopsis = String(pickField(raw, ['synopsis', '简介', '剧情简介', 'synopsisText']) || '').trim();
-        if (synopsis && synopsis.length < 100) {
-          log('WARN', `剧情简介过短（${synopsis.length} 字），已丢弃`);
-          synopsis = '';
-        }
-      }
+    /**
+     * 事件条目正文的两种写法：
+     *
+     *  · **按剧情段落**（完整版默认）：每段一次调用，只喂该段原文。
+     *    修掉旧实现的硬伤 —— 原来全书只调一次、原文节选是 `chunks.slice(0, 4)`：
+     *    一本 25 章的书，第 5 章以后的事件正文，模型根本没看过对应原文，
+     *    只能拿事件清单里的一行 canon 去编起因/经过/结果/影响。
+     *
+     *  · **全书一次**（基础版默认）：调用最少，兼容旧行为。
+     *
+     * 可用 `eventEntriesPerBatch: true/false` 强制开/关（默认跟档位走）。
+     */
+    const perSegmentEventEntries = config.eventEntriesPerBatch === true
+      || (config.eventEntriesPerBatch !== false && isFull(detailLevel));
+    /** 事件清单的公共投影（两个分支共用） */
+    const payloadOf = (list) => list.map(e => ({
+      name: e.name,
+      time: e.time || '',
+      chapter: e.chapter || '',
+      pressure: e.pressure || 'buffer',
+      canon: e.canon || '',
+      interventions: e.interventions || [],
+    }));
+    const byName = new Map();
+    /** 把模型返回的事件条目收进 byName（两个分支共用） */
+    const absorbItems = (rawItems) => {
       for (const it of rawItems) {
         const nm = String(pickField(it, ['name', '事件名', '名称']) ?? '').trim();
         const content = pickContent(it);
@@ -1247,7 +1244,96 @@ export async function runPipeline(config, send) {
         }
         byName.set(nm, { name: nm, content, keys: asArray(it.keys) });
       }
-      if (!rawItems.length) log('WARN', '事件条目撰写返回了空数组');
+    };
+
+    try {
+      if (perSegmentEventEntries) {
+        log('Step 5.5', `按剧情段落撰写事件条目（${events.length} 个事件）`);
+        const grouped = groupEventsBySegment(events, split.batches, { maxChars: worldProbeChars });
+        log('Step 5.5', `事件归段：${grouped.stats.usedSegments}/${grouped.stats.batchCount} 段有事件`
+          + `（已归段 ${grouped.stats.matchedEvents}/${grouped.stats.inputEvents}`
+          + (grouped.stats.unmatchedEvents ? `，${grouped.stats.unmatchedEvents} 个走兜底` : '') + '）');
+        for (const seg of grouped.segments) {
+          checkAbort();
+          try {
+            const raw = await llm.chatJSON(
+              S.STEP_5_EVENT,
+              `事件清单：\n${JSON.stringify(payloadOf(seg.events), null, 2)}`
+              + `\n\n原文节选（${seg.label}）：\n${seg.text}`,
+              'step5',
+            );
+            absorbItems(asArray(raw));
+            log('Step 5.5', `  ${seg.label}：${seg.events.length} 个事件`);
+          } catch (e) {
+            log('WARN', `事件条目撰写失败（${seg.label}）：${e.message}`);
+          }
+        }
+        // 归不进任何段落的事件：用它们自己章节的原文兜底，绝不丢
+        if (grouped.unmatched.length) {
+          try {
+            const excerpt = fallbackExcerpt(chunks, grouped.unmatched.map(e => e.chapter), worldProbeChars);
+            const raw = await llm.chatJSON(
+              S.STEP_5_EVENT,
+              `事件清单：\n${JSON.stringify(payloadOf(grouped.unmatched), null, 2)}\n\n原文节选：\n${excerpt}`,
+              'step5',
+            );
+            absorbItems(asArray(raw));
+            log('Step 5.5', `  兜底批次：${grouped.unmatched.length} 个事件`);
+          } catch (e) {
+            log('WARN', `兜底事件条目撰写失败：${e.message}`);
+          }
+        }
+        /**
+         * 剧情简介单独写。
+         * 按段写时没有任何一次调用看过全书，简介不能指望"顺带"得到。
+         * 输入只用事件清单 + 分批摘要（很小），不塞原文。
+         */
+        try {
+          const summaries = (perBatch || []).map(b => b?.summary).filter(Boolean);
+          const raw = await llm.chatJSON(
+            S.STEP_5_SYNOPSIS,
+            `事件清单：\n${JSON.stringify(events.map(e => ({
+              name: e.name, chapter: e.chapter || '', canon: e.canon || '',
+            })), null, 2)}`
+            + (summaries.length
+              ? `\n\n分批摘要：\n${summaries.map((s, i) => `【第 ${i + 1} 批】${s}`).join('\n')}`
+              : ''),
+            'step5',
+          );
+          synopsis = String(pickField(raw, ['synopsis', '简介', '剧情简介']) || '').trim();
+          if (synopsis && synopsis.length < 100) {
+            log('WARN', `剧情简介过短（${synopsis.length} 字），已丢弃`);
+            synopsis = '';
+          }
+        } catch (e) {
+          log('WARN', `剧情简介撰写失败（不影响事件条目）：${e.message}`);
+        }
+      } else {
+        log('Step 5.5', `撰写事件条目（${events.length} 个，全书一次调用）`);
+        const excerpt = chunks.slice(0, 4).map(c => `${c.title}\n${c.text}`).join('\n\n').slice(0, worldProbeChars);
+        /**
+         * 合并调用（默认）：一次拿回事件条目 + 剧情简介。
+         * 两者需要的信息完全一样（事件清单 + 原文节选），拆开就是同一段原文发两遍。
+         */
+        const merged = mergeSynopsisCalls !== false;
+        const raw = await llm.chatJSON(
+          merged ? S.STEP_5_EVENT_WITH_SYNOPSIS : S.STEP_5_EVENT,
+          `事件清单：\n${JSON.stringify(payloadOf(events), null, 2)}\n\n原文节选：\n${excerpt}`,
+          'step5',
+        );
+        // 不合并时 raw 是数组；合并时是 {events, synopsis}
+        const rawItems = merged ? pickArrayByKeys(raw, ['events', '事件', 'items']) : asArray(raw);
+        if (merged) {
+          synopsis = String(pickField(raw, ['synopsis', '简介', '剧情简介', 'synopsisText']) || '').trim();
+          if (synopsis && synopsis.length < 100) {
+            log('WARN', `剧情简介过短（${synopsis.length} 字），已丢弃`);
+            synopsis = '';
+          }
+        }
+        absorbItems(rawItems);
+        if (!rawItems.length) log('WARN', '事件条目撰写返回了空数组');
+      }
+
       // 只保留能对上 Step 2 事件名的（对不上的会污染变量树）
       eventEntries = events
         .map(e => {
@@ -1261,6 +1347,8 @@ export async function runPipeline(config, send) {
         + (missed ? `（${missed} 条没拿到正文，将回退到简洁格式）` : ''));
       if (synopsis) {
         log('Step 5.5', `原著剧情简介 ${synopsis.length} 字（作为常驻参考条目）`);
+      } else if (perSegmentEventEntries) {
+        log('WARN', '剧情简介为空 —— 请检查模型是否按 {synopsis} 输出');
       } else if (mergeSynopsisCalls !== false) {
         log('WARN', '剧情简介为空 —— 扮演时缺少"整部作品在讲什么"的参考，建议检查模型是否按 {events, synopsis} 输出');
       }
