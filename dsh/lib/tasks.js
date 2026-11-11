@@ -252,6 +252,12 @@ export async function startImageCard(job, {
    * 总结失败返回 null，装配段回退到"只有画面事实"的模式。
    */
   let settingSummary = null;
+  /**
+   * 图片路径的 token 记账：视觉抽取、总结、外观精修用的是**两个 LLM 实例**
+   *（视觉走 extractCharactersFromImages 内部，总结/精修走这里新建的 summaryLlm），
+   * 原来 meta 只记了视觉那一份 → 图片卡成本被低估。现在合并。
+   */
+  let summaryUsage = null;
   try {
     const [{ extractCardSummary }, { makeLLM }] = await Promise.all([
       importCore('image_summary.js'),
@@ -272,6 +278,7 @@ export async function startImageCard(job, {
       contentMode,
       send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
     });
+    summaryUsage = summaryLlm.usage;
     if (settingSummary) {
       emit('progress', {
         step: 'Summary',
@@ -359,6 +366,19 @@ export async function startImageCard(job, {
       counts: { images: imagePaths.length, characters: sum.characters, worldbook: sum.worldbook, entries: sum.entries },
       visionVerified: !!vision.quality?.verified,
       sawImage: vision.sawImage,
+      // token 记账：视觉抽取 + 信息总结 + 外观精修（两个 LLM 实例合并）
+      ...(await (async () => {
+        const { mergeUsage } = await importCore('llm.js');
+        const merged = mergeUsage(vision.usage, summaryUsage);
+        return {
+          usage: {
+            calls: merged.calls.length,
+            inputChars: merged.inputChars,
+            outputChars: merged.outputChars,
+            byStep: merged.byStep,
+          },
+        };
+      })()),
     },
   });
 

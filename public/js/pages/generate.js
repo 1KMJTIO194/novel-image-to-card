@@ -501,7 +501,28 @@ export async function renderGenerate(mount, params) {
       }))),
   );
 
-  augmentCards = [augmentCardCard, strategyCard, instructionCard];
+  /**
+   * 人设整合开关（仅完善模式生效）。
+   *
+   * 原来的合并是纯文本追加：新剧情的人设变化会以「【新增内容】」追加到条目末尾，
+   * 于是"关系变了 / 身份变了"这类变化会前后矛盾地并存。
+   * 打开后对每个匹配到的角色多跑一次整合调用，输出更新后的完整设定。
+   */
+  const integrateToggle = el('input', {
+    type: 'checkbox', id: 'f-integrate', name: 'integrateCharacters', checked: true,
+  });
+  const integrateCard = el('div', { class: 'card' },
+    el('div', { class: 'card-head' }, el('h3', { text: '人设整合' })),
+    el('label', { class: 'check', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+      integrateToggle,
+      el('span', { text: '把新剧情整合进已有人物条目（推荐）' })),
+    el('div', { class: 'hint', style: { marginTop: '4px' },
+      text: '开启后，匹配到的每个角色会多 1 次调用：旧设定 + 新剧情 → 更新后的完整设定，'
+        + '冲突处（关系/身份变化）以新剧情为准，不会两段并存。'
+        + '关掉则沿用"纯文本追加合并"。' }),
+  );
+
+  augmentCards = [augmentCardCard, strategyCard, instructionCard, integrateCard];
   paintStrategies();
 
   const fileCard = el('div', { class: 'card' },
@@ -1376,6 +1397,10 @@ export async function renderGenerate(mount, params) {
       mergeWorldCalls: state.config.mergeWorldCalls !== false,
       mergeCharCalls: state.config.mergeCharCalls !== false,
       charBatchSize: state.config.charBatchSize,
+      // 主要角色定向生成（完整版默认开；基础版可手动打开）
+      charMajorTargeted: state.config.charMajorTargeted,
+      // 完善模式：人设整合（默认开）
+      ...(augmenting ? { integrateCharacters: integrateToggle.checked } : {}),
     }));
 
     state.lastRun = {

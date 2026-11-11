@@ -16,7 +16,7 @@
 | | |
 | --- | --- |
 | 界面结构 | 8 个页面（总览 / 生成流程 / 图片生成 / 任务与产物 / 角色卡内容 / 预设规则 / 命令参考 / 设置） |
-| 测试 | 41 个套件、3369 项断言，全部可离线跑（`npm test`） |
+| 测试 | 44 个套件、3434 项断言，全部可离线跑（`npm test`） |
 | 依赖 | Node.js ≥ 18，6 个运行时依赖 |
 
 ---
@@ -448,6 +448,7 @@ src/
   content_mode.js      角色卡版本（普通版 / 成人版）
   card_format.js       角色卡格式（普通卡 / 完整卡：美化与变量）
   event_segments.js    事件按剧情段落分组（事件条目按段撰写的依据）
+  char_excerpt.js      主要角色的定向节选（按出场章节取样）
   image_detail.js      主要角色外貌/服装精修（分层后单独再看一次图）
   image_slice.js       超长截图竖直切片（解决长图里的文字读不到）—— sharp 是可选依赖
   preset.js            转发 public/js/core/preset-schema.js（保持服务端引入路径稳定）
@@ -829,6 +830,57 @@ const excerpt = chunks.slice(0, 4) ...   // 只有前 4 章
 - DSH 插件面板：同名下拉（默认普通版）
 - 命令行：图片目录脚本加 `--adult`，不加即普通版
 - 完善已有卡（augment）**不提供**这个选项：那是改用户已有的卡，不该改变它的性质
+
+### 主要角色的定向档案（`src/char_excerpt.js`）
+
+原实现里所有角色共用一份「全书均匀随机抽样」（`sampleAcrossText(text, 10000)`）：
+所以"每个角色单独生成"只是把**同一份抽样多发几遍**，模型注意力集中了，但看到的原文并没有更相关。
+
+完整版默认改成：**主要角色（主角 / 主要NPC）逐个生成，且只喂它真正出场的章节**。
+
+```
+按名字/别名在章节里检索出场章 → 首章 + 尾章 + 均匀取样（默认 6 章）
+→ 每章按预算切一段，拼成 ~1 万字节选 → 一次档案调用
+```
+
+| | 基础版 | 完整版 |
+| --- | --- | --- |
+| 主要角色 | 与其余角色一起批量（共享全书随机抽样） | 逐个 + 按出场章节取样 |
+| 次要/路人 | 批量 | 仍批量（逐个只会线性涨成本） |
+| 开关 | `charMajorTargeted: true` 可开 | `charMajorTargeted: false` 可关 |
+
+**实测成本**（5.7 万字 / 25 章 / 7 人物）：完整版 `409,960 → 469,956` 字符（**+14.6%**），
+其中 5 个主要角色定向 + 其余批量。真实小说通常 1 主角 + 2~3 主要NPC，
+对应约 **+7%**。定向人数上限由 `majorTargetedLimit`（默认 5）控制。
+
+### 完善卡的人设整合（`STEP_AUGMENT_INTEGRATE`）
+
+augment 原来的合并是**纯文本追加**：新剧情的人设变化以「【新增内容】」追加到条目末尾，
+于是"关系变了 / 身份变了"这类变化会**前后矛盾地并存**。
+
+现在（默认开启）：对"对齐器匹配到的已有人物条目"各跑一次整合调用：
+
+```
+旧条目正文 + 新剧情里该角色的新信息（重抽档案 + 阶段人设增量）
+→ 更新后的完整 content_yaml（保留旧信息，冲突以新剧情为准）
+```
+
+| | 说明 |
+| --- | --- |
+| 成本 | 每个匹配角色 1 次调用（输入几 K 字符，无原文节选）；`integrateLimit` 默认 8 |
+| 关闭 | 生成页「人设整合」勾选框 / DSH 插件同名勾选框 / `integrateCharacters:false` |
+| 失败 | 不中断任务，保留追加合并结果，并记进 `report.integrateSkipped` |
+| 报告 | `report.integrated`（整合成功的人名）、`updated[].how = 'integrated'` |
+| append 策略 | 不改已有条目，因此也不会整合 |
+
+### 图片路径的 token 记账（`mergeUsage`）
+
+上轮 token 审计发现：图片卡的 `meta.usage` **只统计了视觉抽取**，
+信息总结与外观精修用的是另外的 LLM 实例，没并进 meta → 图片卡成本被低估。
+
+现在 `src/llm.js` 提供 `mergeUsage(...)`，Web 版与插件都会把
+**视觉抽取 + 信息总结 + 外观精修** 三份记账合并进 `meta.usage`，
+`byStep` 里能同时看到 `image-vision` / `image-summary` / `image-detail`。
 
 ### 角色卡格式：普通卡 / 完整卡（`src/card_format.js`）
 
@@ -1331,14 +1383,17 @@ npm run test:form      # 表单规范审计 + 模型选择器 + 模块图完整�
 | `tests/content-mode.mjs` | 72 | **角色卡版本**：默认普通版（不传/传错都回落）、普通版由**代码**删成人字段（不只靠 prompt）、成人版保留并写具体、两档都有「出场角色须成年」；图片路径总结清空/保留成人字段；世界书装配关口；六个入口接线；真跑两档 pipeline |
 | `tests/card-format.mjs` | 77 | **角色卡格式**：默认完整卡、普通卡=完整卡严格子集（只少美化与变量，设定一个不少）、无 `regex_scripts`/`tavern_helper`、跳过状态栏调用、不产出变量/状态栏/正则文件；两档都真跑 pipeline；六个入口接线 |
 | `tests/event-segments.mjs` | 38 | **剧情条目按段落生成**：事件章节标记（含中文数字/无章节兜底）、分组只带本段原文、**最后一段原文确实被喂到**（旧实现永远看不到）、简介独立调用且不塞原文、基础版保持旧行为、`eventEntriesPerBatch` 可强制开关、prompt 接线 |
+| `tests/major-profiles.mjs` | 27 | **主要角色定向档案**：章节检索（名字/别名、单字忽略、首尾+均匀取样）、节选只含出场章节且不超上限、完整版默认开/基础版默认关、定向调用带「按出场章节取样」且**包含后期章节**（旧的全书随机抽样做不到）、次要角色仍批量、`charMajorTargeted`/`majorTargetedLimit` 可开关 |
 | `tests/summary.mjs` | 66 | 变更总结：完善的前后差异、从零生成的产出清单、零变化时给原因、真实报告字段对齐、分类计数不可用时**不显示误导的 0** |
 | `tests/card-doctor.mjs` | 51 | 成卡体检与无损优化：空壳/同名/key 冲突/常驻预算；**只删无 keys 的空壳**，有 keys 的只报告；合并保留两边正文 |
 | `tests/augment-instruction.mjs` | 43 | **完善指令 + 已有卡世界观上下文**：摘要要读得懂（取正文值而不是复述条目名、YAML 键名不外泄、超限截断并说明）、指令段措辞（高优先级、不得违反事实）、以及 `runAugment` 四个步骤确实注入了上下文 |
+| `tests/augment-integrate.mjs` | 20 | **完善卡的人设整合**：默认开启时条目被整合（不再出现「【新增内容】」、含新信息、保留旧信息）、关闭时保持追加合并、整合失败不中断且记进 `integrateSkipped`、append 策略不整合、报告 `how=integrated`、prompt 要求冲突以新剧情为准 |
 | `tests/budget-whole.mjs` | 16 | **整套常驻预算**：卡内置的固定常驻模板（变量更新规则 / 导演指令 / 角色阶段…）从不参与预算计算，于是"导入完整卡时超标"是静默的；这里按用户实际导入的东西复算并告警 |
+| `tests/usage-merge.mjs` | 18 | **图片路径 token 记账**：`mergeUsage` 合并 calls/inputChars/outputChars/byStep、同 step 累加、null/坏值安全；Web 版合并三份（视觉+总结+精修）、插件合并两份；合并后 byStep 同时含 `image-vision` 与 `image-summary` |
 | `tests/dsh-plugin.mjs` | 97 | DSH 插件：multipart 解析（二进制逐字节）、清单/补丁/图标/语言包约定、宿主导出形态、**客户端 bundle 在 vm + 假 React 里实际执行**、**main.key 必须等于 sidebar.panellist.id**、核心目录在四种安装形态下解析（含中文路径）、**查看角色卡文件位置**的面板入口与服务端定位能力 |
 | `tests/dsh-plugin-e2e.mjs` | 96 | DSH 插件 HTTP 端到端：路由挂真服务器 + 假 LLM，跑完整「小说 → 角色卡」与「完善（带指令）」；含 SSE、产物下载、目录穿越拦截、取消；**信任栅栏**（跨站/跨源/非本机一律拒，路由逐条验证）；**打开产物目录 / 定位角色卡文件**（插件重载后仍按 taskId 定位；非法 taskId 与文件名必须拒；越界目录 403） |
 
-合计 **3369 项断言 / 41 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
+合计 **3434 项断言 / 44 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
 找不到引擎时会打印跳过提示而不失败，可用 `EJS_PATH` 环境变量指向任意 ejs 副本。
 
 > `tests/output-mode.mjs`、`api-config.mjs`、`filename-encoding.mjs`、`e2e.mjs` 里有几条断言

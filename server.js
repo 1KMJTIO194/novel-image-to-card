@@ -19,7 +19,7 @@ import { platform } from 'node:os';
 import archiver from 'archiver';
 import { runPipeline } from './src/pipeline.js';
 import { runAugment } from './src/augment.js';
-import { listModels, testConnection, checkBaseUrl, makeLLM } from './src/llm.js';
+import { listModels, testConnection, checkBaseUrl, makeLLM, mergeUsage } from './src/llm.js';
 import { chunkText, estimateTokens, listChapters } from './src/utils.js';
 import { detectAndDecode } from './src/encoding.js';
 import { validatePreset, previewStep, STEP_NAMES, STEP_LABELS } from './src/preset.js';
@@ -1193,6 +1193,13 @@ app.post(
        */
       emit('progress', { step: 'Summary', msg: '总结图片里的信息，归纳成角色与世界的设定…', ts: Date.now() });
       let settingSummary = null;
+      /**
+       * 图片路径的 token 记账：总结与外观精修用的是另外两个 LLM 实例。
+       * 原来 meta.usage 只统计视觉抽取 → 图片卡成本被低估。
+       * 这里把三份 usage 收集起来，最后用 `mergeUsage` 合并进 meta。
+       */
+      let summaryUsage = null;
+      let detailUsage = null;
       try {
         // 复用同一套 LLM 配置（baseUrl / key / 模型 / 预设）
         const summaryLlm = makeLLM({
@@ -1210,6 +1217,7 @@ app.post(
           contentMode,
           send: (ev) => emit(ev.step || 'Summary', ev.msg, ev),
         });
+        summaryUsage = summaryLlm.usage;
       } catch (e) {
         // 总结失败不能让整个任务挂掉 —— 回退到画面事实仍然能出一张卡
         emit('progress', {
@@ -1253,6 +1261,7 @@ app.post(
               ...(opts.detailMax === undefined ? {} : { max: Math.max(0, Math.min(8, Number(opts.detailMax) || 0)) }),
               send: (ev) => emit(ev.step || 'Detail', ev.msg, ev),
             });
+            detailUsage = summaryLlm.usage;
             if (refined.refined.length) {
               emit('progress', {
                 step: 'Detail',
@@ -1348,12 +1357,19 @@ app.post(
         // 角色卡格式（enhanced / plain）
         cardFormat,
         tokens: { card: Math.round(sum.cardBytes / 1.6) },
-        usage: {
-          calls: vision.usage.calls.length,
-          inputChars: vision.usage.inputChars,
-          outputChars: vision.usage.outputChars,
-          byStep: vision.usage.byStep,
-        },
+        /**
+         * 用量记账：**三份 LLM 实例合并**（视觉抽取 + 信息总结 + 外观精修）。
+         * 原来只统计视觉那一份，图片卡成本被低估 —— 用户查成本时看不到总结/精修。
+         */
+        usage: (() => {
+          const merged = mergeUsage(vision.usage, summaryUsage, detailUsage);
+          return {
+            calls: merged.calls.length,
+            inputChars: merged.inputChars,
+            outputChars: merged.outputChars,
+            byStep: merged.byStep,
+          };
+        })(),
       };
 
       const written = await writeImageCardOutputs(outDir, result, {

@@ -32,6 +32,7 @@ import { generateStatusbar } from './step75_statusbar.js';
 import { splitIntoBatches, createContextChain, describeBatches, DEFAULT_BATCH } from './batcher.js';
 import { mergeBatches } from './merge_batches.js';
 import { stampChapter, groupEventsBySegment, fallbackExcerpt } from './event_segments.js';
+import { buildCharacterExcerpt } from './char_excerpt.js';
 import { NPC_TIERS, TIER_RANK, TIER_THRESHOLDS, TIER_DETAIL, LEGACY_ROLE_MAP, normalizeTier, tierDetail } from './tiers.js';
 import { normalizeDetailLevel, detailPreset, withDetailRules, isFull } from './detail_level.js';
 import {
@@ -1007,21 +1008,52 @@ export async function runPipeline(config, send) {
     };
   };
 
-  /** 单角色调用（回退路径，也是批量路径失败后的补救） */
-  const fetchOneProfile = async (r) => {
+  /**
+   * 单角色调用（回退路径，也是批量路径失败后的补救）。
+   *
+   * `opts.excerpt` 允许传**定向节选**（主要角色按出场章节取样）；
+   * 不传就用全书均匀抽样的 `probe`（默认行为）。
+   */
+  const fetchOneProfile = async (r, opts = {}) => {
     // 分层决定档案写多详细（TIER_DETAIL）：路人NPC 只要身份与出处，
     // 让模型把笔墨花在主要NPC 上 —— 一条 1500 字的路人档案既浪费 token
     // 又会在世界书里抢注意力。
     const detail = tierDetail(r.tier, detailLevel);
+    const excerpt = opts.excerpt || probe;
+    const label = opts.label ? `（${opts.label}）` : '';
     const item = await llm.chatJSON(
       promptChar,
       `角色名：${r.name}\n`
       + `已知称呼：${[r.name, ...r.aliases].join('、')}\n`
       + `剧情分层：${detail.label}（出现在 ${r.storyChapters} 章，约全书 ${Math.round((r.storyRatio || 0) * 100)}%）\n`
-      + `本档要求：${detail.fields}\n\n原文节选：\n${probe}`,
+      + `本档要求：${detail.fields}\n\n原文节选${label}：\n${excerpt}`,
       'step5'
     );
     return finalizeCharItem(item, r);
+  };
+
+  /**
+   * 主要角色的**定向档案**：只喂该角色真正出场的章节节选。
+   *
+   * 与"逐个生成"的区别：逐个生成仍共用同一份全书随机抽样，模型看到的
+   * 不一定是这个角色的戏份；定向节选把它的出场章节（首/中/尾）挑出来。
+   */
+  const fetchTargetedProfile = async (r) => {
+    const built = buildCharacterExcerpt(chunks, [r.name, ...(r.aliases || [])], {
+      maxChars: charProbeChars,
+    });
+    if (!built.matched) {
+      // 正文里检索不到（模型改写过的别名/极短篇）：退回全书抽样，不硬造
+      log('WARN', `主要角色「${r.name}」在正文里没检索到出场章节，退回全书抽样节选`);
+      return fetchOneProfile(r);
+    }
+    const shown = built.chapters.slice(0, 3).join('、')
+      + (built.chapters.length > 3 ? `…（共 ${built.chapters.length} 章）` : '');
+    log('Step 5', `主要角色「${r.name}」定向节选：${shown}`);
+    return fetchOneProfile(r, {
+      excerpt: built.text,
+      label: `按出场章节取样：${built.chapters.join('、')}`,
+    });
   };
 
   /**
@@ -1072,7 +1104,43 @@ export async function runPipeline(config, send) {
     }
   };
 
-  const charItems = (await (async () => {
+  /**
+   * 主要角色**定向生成**（完整版默认开）：每个主要角色单独一次调用，
+   * 且喂给它自己出场章节的节选（`src/char_excerpt.js`）。
+   *
+   * 为什么不全员逐个：次要/路人逐个只是把同一份随机抽样多发几遍，成本却按人数线性涨。
+   * 所以只对 主角 + 主要NPC 做定向，其余仍走批量。
+   *
+   * 开关：`charMajorTargeted: true/false`（默认跟档位走）；
+   *      `majorTargetedLimit`（默认 5）限制最多定向几个人，防止全员主要NPC 时成本失控。
+   */
+  const majorTargeted = config.charMajorTargeted === true
+    || (config.charMajorTargeted !== false && isFull(detailLevel));
+  const majorLimit = Math.max(0, Math.min(10, Number(config.majorTargetedLimit ?? 5)));
+  const majorRoster = majorTargeted
+    ? roster.filter(r => (TIER_RANK[r.tier] ?? 9) <= 1).slice(0, majorLimit)
+    : [];
+  const majorNameSet = new Set(majorRoster.map(r => r.name));
+  const restRoster = roster.filter(r => !majorNameSet.has(r.name));
+
+  let majorItems = [];
+  if (majorRoster.length) {
+    log('Step 5', `主要角色定向生成：${majorRoster.length} 人（${majorRoster.map(r => r.name).join('、')}）`
+      + `，其余 ${restRoster.length} 人走批量`);
+    majorItems = (await pMap(majorRoster, async (r) => {
+      try {
+        return await fetchTargetedProfile(r);
+      } catch (e) {
+        log('WARN', `主要角色「${r.name}」定向档案失败（稍后并入批量补抽）：${e.message}`);
+        return null;
+      }
+    }, Math.max(1, Math.min(concurrency, 2)))).filter(Boolean);
+  }
+
+  const restItems = (await (async () => {
+    // 这一段沿用原来的逻辑，但名单只剩"其余角色"
+    const roster = restRoster;
+    if (!roster.length) return [];
     if (!mergeCharCalls || charBatchSize <= 1 || roster.length <= 1) {
       // 回退路径：逐角色调用
       return await pMap(roster, async (r) => {
@@ -1183,6 +1251,15 @@ export async function runPipeline(config, send) {
     const order = new Map(roster.map((r, i) => [r.name, i]));
     return out.sort((a, b) => (order.get(a.name) ?? 1e9) - (order.get(b.name) ?? 1e9));
   })()).filter(Boolean);
+
+  /**
+   * 合并"定向生成的主要角色"与"批量/逐个生成的其余角色"，
+   * 最终仍按**原始名单顺序**排列（世界书条目顺序、变量树顺序都依赖它）。
+   */
+  const rosterOrder = new Map(roster.map((r, i) => [r.name, i]));
+  const charItems = [...majorItems, ...restItems]
+    .filter(Boolean)
+    .sort((a, b) => (rosterOrder.get(a.name) ?? 1e9) - (rosterOrder.get(b.name) ?? 1e9));
   // 档案详细度诊断：新模板要求 600-1500 字，太短说明模型没按模板写
   if (charItems.length) {
     const brief = charItems.map(c => ({ name: c.name, ...inspectContentYaml(c.content) }));

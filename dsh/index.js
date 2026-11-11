@@ -303,6 +303,9 @@ export function apply(ctx) {
         strategy: String(fields.strategy || 'merge'),
         chapterRange: String(fields.chapterRange || 'all'),
         instruction: instruction || undefined,
+        // 人设整合（默认开）：把新剧情整合进已有人物条目；
+        // 面板传 "false" 字符串也要能关掉
+        options: { integrateCharacters: fields.integrateCharacters !== false && fields.integrateCharacters !== 'false' },
         ...common,
       }));
       return sendJson(res, 200, { taskId: job.taskId, kind });

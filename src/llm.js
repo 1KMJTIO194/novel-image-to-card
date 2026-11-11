@@ -258,6 +258,36 @@ export function makeLLM(config, presetArg = undefined) {
 }
 
 /**
+ * 合并多份 usage（多个 LLM 实例的记账并到一份里）。
+ *
+ * 为什么需要：图片路径里**总结**和**外观精修**用的是另外两个 LLM 实例
+ * （`makeLLM` 各建一个），原来的 `meta.usage` 只统计了视觉抽取那一次 ——
+ * 于是图片卡的 token 被**低估**，用户查成本时看不到总结/精修那几笔。
+ *
+ * @param {...any} usages 任意份 usage（null/undefined 会被忽略）
+ * @returns {{calls:Array, byStep:object, inputChars:number, outputChars:number}}
+ */
+export function mergeUsage(...usages) {
+  const calls = [];
+  const byStep = {};
+  for (const u of usages) {
+    if (!u || typeof u !== 'object') continue;
+    for (const c of Array.isArray(u.calls) ? u.calls : []) calls.push(c);
+    for (const [step, agg] of Object.entries(u.byStep || {})) {
+      const acc = byStep[step] || (byStep[step] = { calls: 0, systemChars: 0, userChars: 0, replyChars: 0, ms: 0 });
+      acc.calls += Number(agg.calls) || 0;
+      acc.systemChars += Number(agg.systemChars) || 0;
+      acc.userChars += Number(agg.userChars) || 0;
+      acc.replyChars += Number(agg.replyChars) || 0;
+      acc.ms += Number(agg.ms) || 0;
+    }
+  }
+  const inputChars = calls.reduce((s, c) => s + (Number(c.systemChars) || 0) + (Number(c.userChars) || 0), 0);
+  const outputChars = calls.reduce((s, c) => s + (Number(c.replyChars) || 0), 0);
+  return { calls, byStep, inputChars, outputChars };
+}
+
+/**
  * Base URL 合理性检查。
  *
  * 最常见的配置坑：只写主机名（如 http://localhost:11434、https://api.deepseek.com），

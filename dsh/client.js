@@ -75,7 +75,10 @@ window.__ModuleLoader__.load({
      * 独立出来既好写也好读。
      */
     function AugmentFields(props) {
-      const { cardRef, text, setText, instruction, setInstruction, strategy, setStrategy } = props;
+      const {
+        cardRef, text, setText, instruction, setInstruction, strategy, setStrategy,
+        integrateCharacters, setIntegrateCharacters,
+      } = props;
 
       const cardField = h(Field, { label: '已有角色卡（character_card.json）' },
         h('input', { className: 'n2c-input', type: 'file', accept: '.json', ref: cardRef }));
@@ -108,11 +111,21 @@ window.__ModuleLoader__.load({
         onClick: () => setInstruction(t),
       }, t.slice(0, 14) + '…'));
 
+      /** 人设整合：把新剧情整合进已有人物条目（每个匹配角色多 1 次调用） */
+      const integrateRow = h('div', { className: 'n2c-row', style: { alignItems: 'center', gap: 6 } },
+        h('input', {
+          type: 'checkbox', checked: integrateCharacters !== false,
+          onChange: e => setIntegrateCharacters(e.target.checked),
+        }),
+        h('span', { className: 'n2c-hint' },
+          '人设整合：新剧情整合进已有人物条目（冲突以新剧情为准，推荐）'));
+
       return h('div', { className: 'n2c-col' },
         cardField,
         novelField,
         instructionField,
         h('div', { className: 'n2c-row' }, h(Field, { label: '合并策略' }, strategySelect)),
+        integrateRow,
         h('div', { className: 'n2c-hint' },
           '指令会作为高优先级规则加进事件 / 世界观 / 人物 / 档案四个抽取步骤；'
           + '已有卡的世界观摘要也会一并喂进去（所以"符合原卡世界观"是默认行为）。'),
@@ -129,6 +142,8 @@ window.__ModuleLoader__.load({
       const [title, setTitle] = useState('');
       const [text, setText] = useState('');
       const [strategy, setStrategy] = useState('merge');
+      /** 完善模式：人设整合（默认开；关掉则沿用纯文本追加合并） */
+      const [integrateCharacters, setIntegrateCharacters] = useState(true);
       const [chapterRange, setChapterRange] = useState('all');
       /** 生成档位：basic（默认，token 省）/ full（更细致，token 更多） */
       const [detailLevel, setDetailLevel] = useState('basic');
@@ -345,6 +360,8 @@ window.__ModuleLoader__.load({
           fd.append('cardFormat', cardFormat === 'plain' ? 'plain' : 'enhanced');
           if (tab === 'augment') {
             fd.append('strategy', strategy);
+            // 人设整合（默认开）：把新剧情整合进已有人物条目
+            fd.append('integrateCharacters', integrateCharacters === false ? 'false' : 'true');
             fd.append('novelText', text);
             fd.append('card', cardRef.current.files[0], cardRef.current.files[0].name);
             // 完善指令（服务端也会再校验一次长度）
@@ -366,7 +383,7 @@ window.__ModuleLoader__.load({
           setError(e.message);
           setRunning(false);
         }
-      }, [tab, baseUrl, apiKey, model, title, text, strategy, chapterRange, instruction, openStream]);
+      }, [tab, baseUrl, apiKey, model, title, text, strategy, chapterRange, instruction, integrateCharacters, openStream]);
 
       const cancel = useCallback(async () => {
         if (!taskId) return;
@@ -416,6 +433,7 @@ window.__ModuleLoader__.load({
         tab === 'augment'
           ? h(AugmentFields, {
             cardRef, text, setText, instruction, setInstruction, strategy, setStrategy,
+            integrateCharacters, setIntegrateCharacters,
           })
           : tab === 'image-card'
             ? h('div', { className: 'n2c-col' },

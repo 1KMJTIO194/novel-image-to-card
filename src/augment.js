@@ -19,7 +19,7 @@ import { chunkText, pMap, asArray } from './utils.js';
 import { readNovelText } from './encoding.js';
 import {
   assembleWorldbook, dedupeEvents, groupByStoryline, extractPhaseText,
-  buildVariables,
+  buildVariables, isPlaceholderBody,
   sanitizeRoster, sampleAcrossText, normalizeWorldbookItems,
 } from './pipeline.js';
 import { isCharacterComment, tierFromComment, TIER_RANK } from './tiers.js';
@@ -809,6 +809,105 @@ export async function runAugment(config, send) {
     existing.entries, { ...aligned, newEntries }, config.strategy || 'merge',
   );
 
+  // ---------- 5.5 人设整合（可选）：把新剧情整合进已有人物条目 ----------
+  /**
+   * 用户要求：「人物角色卡有新的剧情时对角色条目进行优化补充」。
+   *
+   * 原来的 merge 策略是**纯文本追加**：新剧情的人设增量拼接到旧条目末尾，
+   * 于是"关系变了 / 身份变了"这类变化会前后矛盾地并存。
+   * 这里对**匹配到的角色**各跑一次整合调用：输入 = 旧条目正文 + 新信息，
+   * 输出 = 更新后的完整 content_yaml（保留旧信息、冲突以新剧情为准）。
+   *
+   * 默认开启（可用 `integrateCharacters:false` 关掉）；append 策略不动已有条目。
+   * 每个角色 1 次调用（输入只有几 K 字符，没有原文节选），上限 `integrateLimit`（默认 8）。
+   */
+  const strategy = config.strategy || 'merge';
+  const integrateEnabled = strategy !== 'append'
+    && !(config.integrateCharacters === false || config.integrateCharacters === 'false');
+  const integrateLimit = Math.max(0, Math.min(20, Number(config.integrateLimit) || 8));
+  const integrated = [];
+  const integrateSkipped = [];
+  if (integrateEnabled && integrateLimit > 0) {
+    /** 新剧情里该角色的人设增量（来自阶段增量表） */
+    const deltasByChar = new Map();
+    for (const p of phasesWithDeltas) {
+      for (const d of p?.characterDeltas || []) {
+        const n = String(d?.character || '').trim();
+        const change = String(d?.change || '').trim();
+        if (!n || !change) continue;
+        if (!deltasByChar.has(n)) deltasByChar.set(n, []);
+        deltasByChar.get(n).push(change);
+      }
+    }
+    const normalizeName = (s) => String(s || '').replace(/\s+/g, '').trim();
+    const findEntry = (name) => mergedEntries.find(e => isCharEntry(e) && extractName(e.comment) === name)
+      || mergedEntries.find(e => isCharEntry(e) && normalizeName(extractName(e.comment)) === normalizeName(name));
+    const findProfile = (name) => characters.find((c) => {
+      const names = [c?.name, ...(Array.isArray(c?.keys) ? c.keys : [])].map(normalizeName).filter(Boolean);
+      return names.includes(normalizeName(name));
+    });
+    const findDeltas = (name) => {
+      const key = [...deltasByChar.keys()].find(k => normalizeName(k) === normalizeName(name));
+      return key ? deltasByChar.get(key) : [];
+    };
+
+    /** 只对"对齐器匹配到的已有人物条目"做整合（新增角色本来就是新设定） */
+    const targets = [];
+    const seen = new Set();
+    for (const m of aligned.matched || []) {
+      if (m.type !== 'character') continue;
+      const name = String(m.existingName || '').trim();
+      if (!name || seen.has(normalizeName(name))) continue;
+      seen.add(normalizeName(name));
+      targets.push(name);
+    }
+    const picked = targets.slice(0, integrateLimit);
+    if (picked.length) {
+      log('Augment', `人设整合：${picked.length}/${targets.length} 个角色（每个 1 次调用；`
+        + `可用 integrateCharacters:false 关闭）`);
+    }
+    for (const name of picked) {
+      checkAbort();
+      const entry = findEntry(name);
+      const profile = findProfile(name);
+      const deltas = findDeltas(name);
+      const newInfoParts = [
+        profile?.content ? `【重抽的人物档案】\n${String(profile.content).trim()}` : '',
+        deltas.length ? `【本段剧情里发生的变化】\n${deltas.join('\n')}` : '',
+      ].filter(Boolean);
+      if (!entry || !String(entry.content || '').trim() || !newInfoParts.length) {
+        integrateSkipped.push({ name, reason: !entry ? '已有条目不存在' : '没有可整合的新信息' });
+        continue;
+      }
+      try {
+        const raw = await llm.chatJSON(
+          S.STEP_AUGMENT_INTEGRATE,
+          `角色名：${name}\n\n【已有设定】\n${String(entry.content).trim()}\n\n`
+          + `【新剧情里的新信息】\n${newInfoParts.join('\n\n')}`,
+          'step5',
+        );
+        const next = String(raw?.content_yaml || raw?.content || '').trim();
+        if (!next || isPlaceholderBody(next)) {
+          integrateSkipped.push({ name, reason: '整合结果为空/占位' });
+          continue;
+        }
+        entry.content = next;
+        integrated.push(name);
+        // 把 mergeEntries 里同名人物的 how 标成 integrated，报告口径统一
+        const u = updated.find(x => x.type === 'character' && normalizeName(x.name) === normalizeName(name));
+        if (u) u.how = 'integrated';
+        else updated.push({ type: 'character', name, how: 'integrated' });
+        log('Augment', `  整合完成：${name}（${String(entry.content).length} 字）`);
+      } catch (e) {
+        integrateSkipped.push({ name, reason: e.message });
+        log('WARN', `人设整合失败（保留追加合并结果）：${name} —— ${e.message}`);
+      }
+    }
+    if (integrated.length) {
+      log('Augment', `人设整合完成 ${integrated.length} 人：${integrated.join('、')}`);
+    }
+  }
+
   // ---------- 6. 合并变量树 + 人设增量表 ----------
   const newVariables = buildVariables(timeline, events, storylines, characters, phasesWithDeltas);
   // ⚠️ 增补**不碰** user 命名空间：它由原卡决定（主角模式可能是 user，参与者模式是另一套）。
@@ -888,6 +987,8 @@ export async function runAugment(config, send) {
     conflicts: aligned.conflicts,
     skipped: [],
     alignDegraded: !!aligned.degraded,
+    integrated,
+    integrateSkipped,
     version: { from: existing.characterVersion, to: finalCard.data.character_version },
   };
   await writeFile(path.join(outDir, 'augment_report.json'), JSON.stringify(report, null, 2), 'utf-8');

@@ -13,6 +13,8 @@
 - 侧栏出现一个「🃏」图标，标签「角色卡生成」
 - 点它切到**中央面板**，三个页签：**小说 → 卡** / **完善已有卡** / **图片 → 卡**
 - 「完善已有卡」页签里有 **完善指令** 多行框（可选，≤2000 字）+ 三个快捷按钮
+- 页签下方有 **人设整合** 勾选框（默认开）：把新剧情整合进已有人物条目，
+  而不是把新设定追加到条目末尾 —— 关掉则沿用纯文本追加合并
 - 面板内：接口设置（可折叠）、角色卡名称、文本/文件输入、进度条与实时日志
 - 跑完列出产物，`character_card.json` 可一键下载
 
@@ -291,8 +293,8 @@ C:\Users\六六六\.dsh\novel2card\output\task_1792745208244\character_card.json
 ## 测试
 
 ```
-node tests/dsh-plugin.mjs        # 82 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析
-node tests/dsh-plugin-e2e.mjs    # 58 项：HTTP 端到端 + 信任栅栏
+node tests/dsh-plugin.mjs        # 97 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析 / 查看卡片位置
+node tests/dsh-plugin-e2e.mjs    # 96 项：HTTP 端到端 + 信任栅栏 + 打开目录/定位卡片
 ```
 
 **`dsh-plugin.mjs` 里最有价值的一条**：把 `client.js` 放进 `vm` + 假 React 里**实际执行一遍**。
