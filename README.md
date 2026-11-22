@@ -16,7 +16,7 @@
 | | |
 | --- | --- |
 | 界面结构 | 8 个页面（总览 / 生成流程 / 图片生成 / 任务与产物 / 角色卡内容 / 预设规则 / 命令参考 / 设置） |
-| 测试 | 45 个套件、3470 项断言，全部可离线跑（`npm test`） |
+| 测试 | 45 个套件、3529 项断言，全部可离线跑（`npm test`） |
 | 依赖 | Node.js ≥ 18，6 个运行时依赖 |
 
 ---
@@ -189,18 +189,27 @@ multipart 的 `filename` 按 RFC 是 latin1 字节串，multer/busboy 逐字节�
 直接生成角色卡，不用另开浏览器标签。
 
 ```bash
-node tests/dsh-plugin.mjs        # 64 项：解析器 / 清单 / 宿主导出 / 客户端 bundle
-node tests/dsh-plugin-e2e.mjs    # 40 项：HTTP 端到端（真跑一次完整生成）
+node tests/dsh-plugin.mjs        # 137 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / Agent 工具
+node tests/dsh-plugin-e2e.mjs    # 115 项：HTTP 端到端（真跑一次完整生成）+ 工具调用端到端
 ```
 
 要点：
 
-- **核心 `src/` 一行没改** —— 插件复用同一套 `pipeline.js` / `augment.js` / `image_card.js`，
+- **核心 `src/` 共用一套** —— 插件复用同样的 `pipeline.js` / `augment.js` / `image_card.js`，
   所以插件产物与本地 Web 版逐字节一致
+- **两种入口，同一套任务**：
+  - 面板：点表单 → HTTP 路由 → SSE 进度
+  - **DSH 聊天工具**：`novel2card_generate` / `novel2card_augment` / `novel2card_image_card` /
+    `novel2card_list_results` / `novel2card_read_result` —— 直接说「把 D:\书.txt 做成角色卡」就行，
+    不需要点开面板
+- 工具用的模型接口配置由面板「模型接口设置 → 保存为工具默认配置」写入
+  `$DSH_HOME/novel2card/tool-config.json`（宿主进程读不到浏览器 localStorage，
+  所以必须有这一步；也可以给工具直接传 `baseUrl` / `model`）
 - 宿主侧走 `ctx.webServer.register`（路由挂在 `/novel2card/`），SSE 进度流可用
   （DSH 的 gzip 过滤器显式豁免 `text/event-stream`）
 - 客户端是 DSH 的 `__ModuleLoader__` bundle，UI 挂到侧栏，样式只用 `--dsw-alias-*` 主题 token
-- **安装必须走 `plugin_manager` 工具或 DSH 的插件页**（`install_bundle` 代劳装包与挂载）
+- **安装必须走 `plugin_manager` 工具或 DSH 的插件页**（`install_bundle` 代劳装包与挂载）；
+  改完插件 JS 要重启 DSH 才会注册新工具
 
 详见 [dsh/README.md](dsh/README.md)，含路由表、数据目录与**未验证部分**的诚实说明。
 
@@ -1418,10 +1427,10 @@ npm run test:form      # 表单规范审计 + 模型选择器 + 模块图完整�
 | `tests/budget-whole.mjs` | 16 | **整套常驻预算**：卡内置的固定常驻模板（变量更新规则 / 导演指令 / 角色阶段…）从不参与预算计算，于是"导入完整卡时超标"是静默的；这里按用户实际导入的东西复算并告警 |
 | `tests/usage-merge.mjs` | 18 | **图片路径 token 记账**：`mergeUsage` 合并 calls/inputChars/outputChars/byStep、同 step 累加、null/坏值安全；Web 版合并三份（视觉+总结+精修）、插件合并两份；合并后 byStep 同时含 `image-vision` 与 `image-summary` |
 | `tests/token-audit.mjs` | 36 | **Token 审计工具**：字符→Token 换算、按步骤汇总、真实任务审计（成功/失败/浪费/倍数）、报告渲染；确定性模拟钉住配置成本关系（完整版 > 基础版、关 P0/P1 各自能省、逐个档案比批量贵）；prompt 分类与 CLI 参数 |
-| `tests/dsh-plugin.mjs` | 97 | DSH 插件：multipart 解析（二进制逐字节）、清单/补丁/图标/语言包约定、宿主导出形态、**客户端 bundle 在 vm + 假 React 里实际执行**、**main.key 必须等于 sidebar.panellist.id**、核心目录在四种安装形态下解析（含中文路径）、**查看角色卡文件位置**的面板入口与服务端定位能力 |
-| `tests/dsh-plugin-e2e.mjs` | 96 | DSH 插件 HTTP 端到端：路由挂真服务器 + 假 LLM，跑完整「小说 → 角色卡」与「完善（带指令）」；含 SSE、产物下载、目录穿越拦截、取消；**信任栅栏**（跨站/跨源/非本机一律拒，路由逐条验证）；**打开产物目录 / 定位角色卡文件**（插件重载后仍按 taskId 定位；非法 taskId 与文件名必须拒；越界目录 403） |
+| `tests/dsh-plugin.mjs` | 137 | DSH 插件：multipart 解析（二进制逐字节）、清单/补丁/图标/语言包约定、宿主导出形态、**客户端 bundle 在 vm + 假 React 里实际执行**、**main.key 必须等于 sidebar.panellist.id**、核心目录在四种安装形态下解析（含中文路径）、**查看角色卡文件位置**、**Agent 工具**（5 个工具的定义/注册/配置读写/路径白名单） |
+| `tests/dsh-plugin-e2e.mjs` | 115 | DSH 插件 HTTP 端到端：路由挂真服务器 + 假 LLM，跑完整「小说 → 角色卡」与「完善（带指令）」；含 SSE、产物下载、目录穿越拦截、取消；**信任栅栏**（跨站/跨源/非本机一律拒，路由逐条验证）；**打开产物目录 / 定位角色卡文件**；**Agent 工具端到端**（保存接口配置 → generate/augment 工具真实产出卡片 → list/read 找回结果） |
 
-合计 **3470 项断言 / 45 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
+合计 **3529 项断言 / 45 个套件**。EJS 渲染那组断言需要 `ejs`（已列为 devDependency）；
 找不到引擎时会打印跳过提示而不失败，可用 `EJS_PATH` 环境变量指向任意 ejs 副本。
 
 > `tests/output-mode.mjs`、`api-config.mjs`、`filename-encoding.mjs`、`e2e.mjs` 里有几条断言

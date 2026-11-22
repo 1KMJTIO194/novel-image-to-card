@@ -160,6 +160,10 @@ window.__ModuleLoader__.load({
       /** 完善指令：会拼进每个抽取步骤的 prompt */
       const [instruction, setInstruction] = useState('');
 
+      /** Agent 工具的默认接口配置（GET /tool-config；只含脱敏字段） */
+      const [toolConfig, setToolConfig] = useState(null);
+      const [savingToolConfig, setSavingToolConfig] = useState(false);
+
       const [running, setRunning] = useState(false);
       const [taskId, setTaskId] = useState(null);
       const [logs, setLogs] = useState([]);
@@ -290,12 +294,39 @@ window.__ModuleLoader__.load({
           }
         } catch (_) { /* 忽略 */ }
         fetch(`${API}/tasks`).then(r => r.json()).then(j => setTasks(j.tasks || [])).catch(() => {});
+        // 工具默认配置状态（DSH 聊天里的 novel2card_* 工具用）
+        fetch(`${API}/tool-config`).then(r => r.json()).then(j => setToolConfig(j.config || null)).catch(() => {});
         return () => { try { esRef.current?.close(); } catch (_) { /* 忽略 */ } };
       }, []);
 
       useEffect(() => {
         try { localStorage.setItem('novel2card.llm', JSON.stringify({ baseUrl, apiKey, model })); } catch (_) { /* 忽略 */ }
       }, [baseUrl, apiKey, model]);
+
+      /**
+       * 把当前接口配置保存成「工具默认配置」。
+       *
+       * 为什么需要这一步：面板配置在浏览器 localStorage，而 DSH 聊天里的
+       * novel2card_* 工具跑在宿主进程，读不到 localStorage。保存后工具才能直接用。
+       */
+      const saveToolDefaults = useCallback(async () => {
+        setSavingToolConfig(true);
+        try {
+          const r = await fetch(`${API}/tool-config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ baseUrl, apiKey, model }),
+          });
+          const j = await r.json();
+          if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+          setToolConfig(j.config || null);
+          pushLog('✅ 已保存为工具默认配置：DSH 聊天里可以直接调用 novel2card_* 工具');
+        } catch (e) {
+          pushLog(`❌ 保存工具配置失败：${e.message}`);
+        } finally {
+          setSavingToolConfig(false);
+        }
+      }, [baseUrl, apiKey, model, pushLog]);
 
       useEffect(() => {
         if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -424,7 +455,22 @@ window.__ModuleLoader__.load({
               placeholder: 'deepseek-flash', spellCheck: false,
             })),
             h('div', { className: 'n2c-hint' },
-              '插件用你在这里填的接口，不读取 DSH 的模型配置（两者可能指向不同的服务商）。'))),
+              '插件用你在这里填的接口，不读取 DSH 的模型配置（两者可能指向不同的服务商）。'),
+            h('div', { className: 'n2c-row', style: { alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              h('button', {
+                className: 'n2c-btn', type: 'button', disabled: savingToolConfig,
+                onClick: saveToolDefaults,
+              }, savingToolConfig ? '保存中…' : '保存为工具默认配置'),
+              h('span', {
+                className: 'n2c-hint',
+                text: toolConfig?.configured
+                  ? `工具默认：${toolConfig.model}${toolConfig.hasApiKey ? '（已存 Key）' : '（无 Key）'}`
+                  : 'DSH 聊天工具尚未配置接口',
+              })),
+            h('div', { className: 'n2c-hint' },
+              '保存后，DSH 聊天里可以直接说「用 novel2card_generate 把 D:\\书.txt 做成角色卡」——'
+              + '工具与这个面板走同一套生成流程，产物在同一个任务目录；'
+              + '工具也可以随时用 novel2card_list_results / novel2card_read_result 找回结果。'))),
 
         h(Field, { label: '角色卡名称（可选）' },
           h('input', { className: 'n2c-input', value: title, onChange: e => setTitle(e.target.value) })),

@@ -204,6 +204,49 @@ NOVEL2CARD_TRUSTED_HOSTS=card.example.com,192.168.1.9:19387
 
 ---
 
+## 在 DSH 聊天里直接跑（Agent 工具）
+
+用户反馈："插件版感觉不如直接让 dsh 直接跑角色卡生成任务"。
+面板适合"人点表单"，但模型在对话里够不到 —— 所以插件把同一批能力注册成了 **DSH 工具**。
+
+| 工具 | 作用 |
+| --- | --- |
+| `novel2card_generate` | 小说（`novelPath` 或 `text`）→ 角色卡 |
+| `novel2card_augment` | 已有卡（`cardPath`）+ 新剧情 → 完善（支持 `instruction` / `strategy` / `integrateCharacters`） |
+| `novel2card_image_card` | 图片（`imagePaths` 或 `imageDir`）→ 角色卡 |
+| `novel2card_list_results` | 列出历史任务（找回上次的 taskId / 产物目录） |
+| `novel2card_read_result` | 读某个任务的产物（`character_card.json` / `summary.json` / `meta.json` …） |
+
+用法（装好插件、重启 DSH 之后）：
+
+> 把 `D:\书\斗破.txt` 做成角色卡，用完整版
+>
+> 用 `D:\卡\character_card.json` 和这段新剧情完善一下，只并角色
+>
+> 把 `D:\图\角色` 里的图片做成卡
+
+工具与面板**走同一套 tasks / pipeline 实现**，产物在同一个任务目录，只是调用入口不同。
+每次生成会真实调用模型接口，书越长耗时越久（几分钟）；结果里会给出 taskId、产物目录、统计与用量。
+
+### 接口配置：先点一次「保存为工具默认配置」
+
+面板里的 Base URL / API Key / 模型存在浏览器 localStorage，**宿主进程（工具调用）读不到**。
+在「模型接口设置」折叠区点一次 **保存为工具默认配置**，写入：
+
+```
+$DSH_HOME/novel2card/tool-config.json   （字段：baseUrl / apiKey / model，权限 0600）
+```
+
+之后工具就可以只传小说路径。优先级：**工具参数 > 保存的默认配置 > 环境变量**
+（`NOVEL2CARD_BASE_URL` / `NOVEL2CARD_API_KEY` / `NOVEL2CARD_MODEL`）。
+
+> 没保存也能用：给工具传 `baseUrl` / `model`（本机模型服务可免 `apiKey`）即可。
+> 文件里的 Key 只在本机使用，不会出现在日志或工具结果里（只回显 `hasApiKey`）。
+
+> ⚠️ 工具是插件 JS 的一部分：**改完代码要重启 DSH**（或禁用/启用插件）才会注册进当前进程。
+
+---
+
 ## 路由
 
 全部挂在 `/novel2card/` 前缀下。**命名空间是硬要求**：DSH 的路由表里重复 `(kind, path)` 会直接抛错。
@@ -217,6 +260,7 @@ NOVEL2CARD_TRUSTED_HOSTS=card.example.com,192.168.1.9:19387
 | GET | `/novel2card/stream?id=` | **SSE 事件流**（start / progress / files / done） |
 | GET | `/novel2card/file?id=&name=` | 下载单个产物（限定在任务目录内，防目录穿越） |
 | POST | `/novel2card/reveal` | 在系统文件管理器里打开产物目录（目录只能来自任务记录） |
+| GET/POST | `/novel2card/tool-config` | Agent 工具的默认模型接口配置（只回脱敏字段） |
 | POST | `/novel2card/cancel` | 协作式取消 |
 | POST | `/novel2card/remove` | 删除任务记录与产物 |
 
@@ -293,8 +337,8 @@ C:\Users\六六六\.dsh\novel2card\output\task_1792745208244\character_card.json
 ## 测试
 
 ```
-node tests/dsh-plugin.mjs        # 97 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 核心目录解析 / 查看卡片位置
-node tests/dsh-plugin-e2e.mjs    # 96 项：HTTP 端到端 + 信任栅栏 + 打开目录/定位卡片
+node tests/dsh-plugin.mjs        # 137 项：解析器 / 清单 / 宿主导出 / 客户端 bundle / 查看卡片位置 / Agent 工具
+node tests/dsh-plugin-e2e.mjs    # 115 项：HTTP 端到端 + 信任栅栏 + 打开目录/定位卡片 + 工具调用
 ```
 
 **`dsh-plugin.mjs` 里最有价值的一条**：把 `client.js` 放进 `vm` + 假 React 里**实际执行一遍**。

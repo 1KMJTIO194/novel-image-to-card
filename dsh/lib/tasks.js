@@ -183,6 +183,8 @@ export async function startAugment(job, {
   });
 
   return runAugment({
+    // 复用插件侧已经建好的任务 id 与产物目录：面板 / 工具都按 job.taskId 找产物
+    taskId: job.taskId,
     outDir: job.outDir,
     cardPath,
     cardFileName: path.basename(cardPath),

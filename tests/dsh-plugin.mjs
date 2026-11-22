@@ -134,11 +134,13 @@ console.log('\n【3】宿主入口导出形态');
 
   // 用假 ctx 跑一遍 apply，确认它注册了路由且每个都有 disposer
   const registered = [];
+  const registeredTools = [];
   const effects = [];
   const fakeCtx = {
     webServer: { register: (r) => { registered.push(r); return () => {}; } },
     effect: (fn, label) => { effects.push(label); const d = fn(); return () => { if (typeof d === 'function') d(); }; },
-    logger: { info: () => {} },
+    get: (name) => (name === 'tools' ? { register: (d) => { registeredTools.push(d.name); return () => {}; } } : null),
+    logger: { info: () => {}, warn: () => {} },
   };
   HostMod.apply(fakeCtx);
 
@@ -155,8 +157,14 @@ console.log('\n【3】宿主入口导出形态');
   ok('每个注册都包在 ctx.effect 里（卸载即移除）', effects.length >= registered.length,
     `${effects.length} effects / ${registered.length} routes`);
   for (const need of ['/novel2card/meta', '/novel2card/generate', '/novel2card/task',
-    '/novel2card/stream', '/novel2card/file', '/novel2card/tasks']) {
+    '/novel2card/stream', '/novel2card/file', '/novel2card/tasks', '/novel2card/tool-config']) {
     ok(`有 ${need}`, paths.includes(need), JSON.stringify(paths));
+  }
+  ok('注册了 5 个 Agent 工具（DSH 聊天里直接跑）', registeredTools.length === 5,
+    JSON.stringify(registeredTools));
+  for (const t of ['novel2card_generate', 'novel2card_augment', 'novel2card_image_card',
+    'novel2card_list_results', 'novel2card_read_result']) {
+    ok(`注册了工具 ${t}`, registeredTools.includes(t), JSON.stringify(registeredTools));
   }
 }
 
@@ -313,11 +321,13 @@ console.log('\n【4b】查看角色卡文件位置（面板入口 + 服务端定
   ok('产物区块不再被 artifacts.length 挡死（outDir 已知就显示）',
     /\(artifacts\.length \|\| outDir\)/.test(clientSrc), '');
 
-  // ② 服务端
-  ok('服务端有 taskId → 目录的解析函数', /const resolveTaskDir = \(taskId\)/.test(hostSrc), '');
+  // ② 服务端（路径规则已抽到 lib/task_paths.js，HTTP 面与 Agent 工具共用）
+  const pathsSrc = await readFile(path.join(DSH, 'lib/task_paths.js'), 'utf-8');
+  ok('服务端有 taskId → 目录的解析入口（走共享实现）',
+    /const resolveTaskDir = \(taskId\) => resolveTaskDirIn\(baseDir, taskId\)/.test(hostSrc), '');
   ok('taskId 用白名单正则（挡住 ../ 与绝对路径）',
-    /TASK_ID_RE = \/\^task_\\d\{6,\}\$\//.test(hostSrc), '');
-  ok('文件名用白名单正则', /SAFE_FILE_RE = /.test(hostSrc), '');
+    /TASK_ID_RE = \/\^task_\\d\{6,\}\$\//.test(pathsSrc), '');
+  ok('文件名用白名单正则', /SAFE_FILE_RE = /.test(pathsSrc), '');
   ok('定位文件用 explorer /select（Windows 才会真的选中文件）',
     /\/select,\$\{target\}/.test(hostSrc), '');
   ok('macOS 用 open -R', /'-R', target/.test(hostSrc), '');
@@ -406,6 +416,104 @@ console.log('\n【7】核心目录解析（安装位置不确定 + 中文路径�
     } finally {
       await rm(tmp, { recursive: true, force: true }).catch(() => {});
     }
+  }
+}
+
+// ============================================================
+console.log('\n【12】Agent 工具：DSH 聊天里直接跑生成任务');
+{
+  const Tools = await import(pathToFileURL(path.join(DSH, 'lib/agent_tools.js')).href);
+  const Cfg = await import(pathToFileURL(path.join(DSH, 'lib/tool_config.js')).href);
+  const Paths = await import(pathToFileURL(path.join(DSH, 'lib/task_paths.js')).href);
+
+  const baseDir = await mkdtemp(path.join(tmpdir(), 'n2c-tools-'));
+  try {
+    // ① 定义形状（raw JSON-Schema 工具）
+    const defs = Tools.createToolDefinitions({ baseDir });
+    ok('定义了 5 个工具', defs.length === 5, String(defs.length));
+    ok('工具名都以 novel2card_ 开头',
+      defs.every(d => d.name.startsWith('novel2card_')), defs.map(d => d.name).join(','));
+    ok('每个工具都有 parameters / output.schema / execute / render',
+      defs.every(d => d.parameters?.type === 'object'
+        && d.parameters?.properties && Array.isArray(d.parameters?.required)
+        && d.parameters?.additionalProperties === false
+        && d.output?.schema?.type === 'object'
+        && typeof d.execute === 'function'
+        && typeof d.output.render === 'function'), '');
+    const gen = defs.find(d => d.name === 'novel2card_generate');
+    ok('generate 支持 novelPath 与 text 两种输入',
+      !!gen.parameters.properties.novelPath && !!gen.parameters.properties.text, '');
+    ok('generate 有档位/版本/格式枚举',
+      ['detailLevel', 'contentMode', 'cardFormat'].every(k => Array.isArray(gen.parameters.properties[k]?.enum)),
+      '');
+    const aug = defs.find(d => d.name === 'novel2card_augment');
+    ok('augment 必填 cardPath', JSON.stringify(aug.parameters.required) === '["cardPath"]', '');
+    const img = defs.find(d => d.name === 'novel2card_image_card');
+    ok('image_card 支持 imagePaths 与 imageDir',
+      !!img.parameters.properties.imagePaths && !!img.parameters.properties.imageDir, '');
+    const read = defs.find(d => d.name === 'novel2card_read_result');
+    ok('read_result 必填 taskId', JSON.stringify(read.parameters.required) === '["taskId"]', '');
+
+    // ② 注册 / 卸载
+    let registered = [];
+    const ctx = { tools: { register: (d) => { registered.push(d.name); return () => {}; } } };
+    const off = Tools.registerTools(ctx, { baseDir });
+    ok('registerTools 注册 5 个', registered.length === 5, registered.join(','));
+    ok('registerTools 返回 disposer', typeof off === 'function', '');
+    off();
+
+    // ③ 工具配置：读写 / 脱敏 / 优先级 / 缺配置报人话
+    ok('未保存时 configured=false', Cfg.maskToolConfig(null).configured === false, '');
+    await Cfg.writeToolConfig(baseDir, { baseUrl: 'https://api.deepseek.com/v1/', apiKey: 'sk-test-123', model: 'deepseek-flash' });
+    const saved = await Cfg.readToolConfig(baseDir);
+    ok('写配置会去掉 baseUrl 末尾斜杠', saved.baseUrl === 'https://api.deepseek.com/v1', saved.baseUrl);
+    const masked = Cfg.maskToolConfig(saved);
+    ok('脱敏视图不返回 apiKey', masked.hasApiKey === true && !('apiKey' in masked), JSON.stringify(masked));
+    ok('resolve 优先用工具参数',
+      Cfg.resolveLLMConfig({ model: 'override' }, saved).model === 'override', '');
+    ok('没参数时用保存的默认值',
+      Cfg.resolveLLMConfig({}, saved).model === 'deepseek-flash', '');
+    let threw = null;
+    try { Cfg.resolveLLMConfig({}, null, {}); } catch (e) { threw = e; }
+    ok('没有配置时给出可读错误（指引去面板保存）',
+      !!threw && /保存为工具默认/.test(threw.message), threw?.message);
+    ok('本机服务可以不要 API Key',
+      Cfg.resolveLLMConfig({ baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen' }, null, {}).apiKey === '',
+      '');
+    threw = null;
+    try { Cfg.resolveLLMConfig({ baseUrl: 'https://api.deepseek.com/v1', model: 'm' }, null, {}); } catch (e) { threw = e; }
+    ok('远程服务缺 Key 时明确报错', !!threw && /缺少 API Key/.test(threw.message), threw?.message);
+
+    // ④ 路径规则（工具与 HTTP 共用）
+    ok('TASK_ID_RE 接受正常 id', Paths.TASK_ID_RE.test('task_1794240480911'), '');
+    for (const bad of ['../x', '/etc/passwd', 'task_12', 'C:\\x', 'task_abc']) {
+      ok(`TASK_ID_RE 拒绝 ${JSON.stringify(bad)}`, !Paths.TASK_ID_RE.test(bad), '');
+    }
+    await mkdir(path.join(baseDir, 'output', 'task_1794240480911'), { recursive: true });
+    await writeFile(path.join(baseDir, 'output', 'task_1794240480911', 'character_card.json'), '{}', 'utf-8');
+    ok('resolveTaskDir 能定位真实任务目录',
+      Paths.resolveTaskDir(baseDir, 'task_1794240480911') === path.join(baseDir, 'output', 'task_1794240480911'),
+      String(Paths.resolveTaskDir(baseDir, 'task_1794240480911')));
+    ok('resolveTaskDir 对不存在的任务返回 null', Paths.resolveTaskDir(baseDir, 'task_9999999999999') === null, '');
+    ok('resolveArtifactPath 只放行白名单文件', (() => {
+      try { return Paths.resolveArtifactPath(baseDir, 'task_1794240480911', 'character_card.json').endsWith('character_card.json'); }
+      catch { return false; }
+    })(), '');
+    threw = null;
+    try { Paths.resolveArtifactPath(baseDir, 'task_1794240480911', '../secret.txt'); } catch (e) { threw = e; }
+    ok('resolveArtifactPath 拒绝路径穿越', !!threw, threw?.message);
+
+    // ⑤ 面板：保存按钮与工具提示接线
+    const clientSrc = await readFile(path.join(DSH, 'client.js'), 'utf-8');
+    ok('面板有「保存为工具默认配置」按钮', /保存为工具默认配置/.test(clientSrc), '');
+    ok('面板提示 DSH 聊天可直接调用工具', /novel2card_generate/.test(clientSrc), '');
+    ok('面板会读 /tool-config', /tool-config/.test(clientSrc), '');
+
+    const hostSrc2 = await readFile(path.join(DSH, 'index.js'), 'utf-8');
+    ok('宿主注册了 Agent 工具（registerTools）', /registerTools/.test(hostSrc2), '');
+    ok('宿主提供工具配置读写路由', /writeToolConfig/.test(hostSrc2) && /readToolConfig/.test(hostSrc2), '');
+  } finally {
+    await rm(baseDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

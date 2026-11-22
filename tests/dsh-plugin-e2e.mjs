@@ -13,8 +13,9 @@
  */
 import http from 'node:http';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { rm, mkdtemp } from 'node:fs/promises';
+import { rm, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -183,9 +184,14 @@ process.env.DSH_HOME = tmpRoot;
 const HostMod = await import(pathToFileURL(path.join(ROOT, 'dsh/index.js')).href);
 
 const routes = [];
+/** 插件注册的 Agent 工具（DSH 聊天里直接跑生成任务） */
+const toolDefs = [];
 const fakeCtx = {
   webServer: { register: (r) => { routes.push(r); return () => { routes.splice(routes.indexOf(r), 1); }; } },
   effect: (fn) => { const d = fn(); return () => { if (typeof d === 'function') d(); }; },
+  get: (name) => (name === 'tools'
+    ? { register: (d) => { toolDefs.push(d); return () => {}; } }
+    : null),
   logger: { info: () => {} },
 };
 HostMod.apply(fakeCtx);
@@ -706,9 +712,92 @@ console.log('\n【8b】查看角色卡的文件位置（插件重载后也要能
 }
 
 // ============================================================
+console.log('\n【9】Agent 工具：DSH 聊天里直接跑生成任务');
+{
+  /** 按名字取工具定义 */
+  const find = (name) => toolDefs.find(d => d.name === name);
+  ok('插件向宿主注册了 5 个工具', toolDefs.length === 5, String(toolDefs.length));
+  ok('工具名带 novel2card_ 前缀',
+    toolDefs.every(d => d.name.startsWith('novel2card_')), toolDefs.map(d => d.name).join(','));
+
+  // ① 工具默认配置（面板「保存为工具默认配置」写的就是它）
+  const cfg0 = await (await fetch(`${BASE}/novel2card/tool-config`)).json();
+  ok('初始未配置工具接口', cfg0.ok === true && cfg0.config.configured === false,
+    JSON.stringify(cfg0.config));
+  const badCfg = await fetch(`${BASE}/novel2card/tool-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseUrl: '', model: '' }),
+  });
+  ok('空配置被拒（400 + 可读原因）', badCfg.status === 400,
+    JSON.stringify(await badCfg.json().catch(() => null)));
+
+  const saveRes = await fetch(`${BASE}/novel2card/tool-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseUrl: `http://127.0.0.1:${LLM_PORT}/v1`, apiKey: 'sk-mock', model: 'mock-model' }),
+  });
+  const saved = await saveRes.json();
+  ok('保存工具接口配置成功', saved.ok === true && saved.config.configured === true, JSON.stringify(saved));
+  ok('保存结果脱敏（不回 apiKey）',
+    saved.config.hasApiKey === true && !('apiKey' in saved.config), JSON.stringify(saved.config));
+
+  // ② 生成工具：不传 baseUrl，验证它真的读到了保存的配置
+  const novelPath = path.join(tmpRoot, 'tool-novel.txt');
+  await writeFile(novelPath,
+    '第一章\n' + '林昭入城，沈砚在茶楼相迎。'.repeat(60)
+    + '\n第二章\n' + '夜探旧宅，得到密信。'.repeat(60), 'utf-8');
+  const genTool = find('novel2card_generate');
+  ok('工具定义带 execute / render',
+    typeof genTool?.execute === 'function' && typeof genTool?.output?.render === 'function', '');
+  const gen = await genTool.execute({ novelPath, title: '工具生成测试', detailLevel: 'basic' },
+    { signal: new AbortController().signal });
+  ok('generate 工具跑通（用的是保存的接口配置）', gen.ok === true && /^task_/.test(gen.taskId),
+    JSON.stringify(gen).slice(0, 160));
+  ok('返回真实产物目录与卡片路径', typeof gen.outDir === 'string' && existsSync(gen.cardPath), gen.cardPath);
+  ok('返回统计里有角色数', !!gen.counts && Number(gen.counts.characters) >= 1, JSON.stringify(gen.counts));
+  const genText = genTool.output.render({}, gen)[0]?.text || '';
+  ok('render 文本含任务与目录',
+    genText.includes(gen.taskId) && genText.includes(gen.outDir), genText.slice(0, 160));
+
+  // ③ 找回结果：list / read
+  const listed = await find('novel2card_list_results').execute({ limit: 20 }, {});
+  ok('list_results 能找到刚生成的任务',
+    Array.isArray(listed.tasks) && listed.tasks.some(t => t.taskId === gen.taskId),
+    JSON.stringify(listed.tasks?.slice(0, 3)));
+  const readTool = find('novel2card_read_result');
+  const metaRead = await readTool.execute({ taskId: gen.taskId, file: 'meta.json', maxChars: 4000 }, {});
+  ok('read_result 能读 meta.json', metaRead.content.includes(gen.taskId) && metaRead.truncated === false,
+    String(metaRead.content || '').slice(0, 80));
+  const filesRead = await readTool.execute({ taskId: gen.taskId }, {});
+  ok('read_result 不给 file 时列出产物清单',
+    filesRead.files.some(f => f.name === 'character_card.json'), JSON.stringify(filesRead.files));
+  let readThrew = null;
+  try { await readTool.execute({ taskId: gen.taskId, file: '../meta.json' }, {}); } catch (e) { readThrew = e; }
+  ok('read_result 拒绝路径穿越文件名', !!readThrew, readThrew?.message);
+
+  // ④ 完善工具：拿刚生成的卡继续增补
+  const augTool = find('novel2card_augment');
+  const aug = await augTool.execute({
+    cardPath: gen.cardPath,
+    text: '第三章\n林昭拜入缉影司，查得旧案线索。'.repeat(40),
+    instruction: '只并角色',
+  }, { signal: new AbortController().signal });
+  ok('augment 工具跑通', aug.ok === true && /^task_/.test(aug.taskId), JSON.stringify(aug).slice(0, 160));
+  ok('augment 返回匹配/新增统计', !!aug.augment && typeof aug.augment.matched === 'number',
+    JSON.stringify(aug.augment));
+  ok('augment 产物里有报告文件',
+    (aug.files || []).some(f => f.name === 'augment_report.json'), JSON.stringify(aug.files));
+
+  // ⑤ 参数校验：缺输入时给可读错误（不是崩）
+  let genThrew = null;
+  try { await genTool.execute({}, {}); } catch (e) { genThrew = e; }
+  ok('generate 缺小说输入时报可读错误', !!genThrew && /novelPath/.test(genThrew.message), genThrew?.message);
+}
+
+// ============================================================
 // 收尾
-await new Promise(r => server.close(r));
-await new Promise(r => mockLLM.close(r));
+await new Promise(r => server.close(r));await new Promise(r => mockLLM.close(r));
 await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
 
 console.log(`\n${'='.repeat(46)}`);

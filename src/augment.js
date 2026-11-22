@@ -597,8 +597,19 @@ export async function runAugment(config, send) {
   };
 
   const llm = makeLLM(config, config.preset || null);
-  const taskId = `task_${Date.now()}`;
-  const outDir = path.join(config.outputDir || 'output', taskId);
+  /**
+   * 任务 id 与产物目录。
+   *
+   * 两种调用方：
+   *   · 本地 Web / CLI：只传 `outputDir`（输出根），这里自己生成 taskId 并拼目录；
+   *   · DSH 插件：任务由 `dsh/lib/tasks.js` 先建好（有 job.taskId / job.outDir），
+   *     必须**复用**它——否则插件侧按 job.taskId 找不到产物（实测就是 augment 的
+   *     卡片落到了 ./output/<另一个 id>，面板下载 404）。
+   */
+  const taskId = String(config.taskId || `task_${Date.now()}`);
+  const outDir = config.outDir
+    ? path.resolve(config.outDir)
+    : path.join(config.outputDir || 'output', taskId);
   await mkdir(outDir, { recursive: true });
   send('start', { taskId, startedAt: new Date().toISOString() });
 

@@ -22,6 +22,9 @@ import {
 } from './lib/tasks.js';
 import { getBoundary, readBody, parseMultipart, collectMultipart } from './lib/multipart.js';
 import { requestRejection } from './lib/guard.js';
+import { TASK_ID_RE, SAFE_FILE_RE, resolveTaskDir as resolveTaskDirIn } from './lib/task_paths.js';
+import { readToolConfig, writeToolConfig, maskToolConfig } from './lib/tool_config.js';
+import { registerTools } from './lib/agent_tools.js';
 
 export const name = 'novel2card';
 
@@ -121,30 +124,10 @@ export function apply(ctx) {
   /**
    * 任务 id 的形态：`task_<毫秒时间戳>`（见 lib/tasks.js 的 newTaskId）。
    *
-   * 刻意用**白名单正则**而不是"过滤 ../"：只要 id 不是这个形态就一律拒绝，
-   * 路径穿越、绝对路径、UNC、`..` 全部天然挡在外面。
+   * 规则与白名单都抽到了 `lib/task_paths.js` —— Agent 工具也走同一份，
+   * 安全边界不能有第二份实现。
    */
-  const TASK_ID_RE = /^task_\d{6,}$/;
-
-  /**
-   * 由 taskId 解析出产物目录（不依赖内存里的 job）。
-   *
-   * 为什么需要它：插件重载后 `jobs` 是空的，可是产物仍然躺在磁盘上。
-   * 用户这时想「看看刚才生成的角色卡在哪」就没有入口了 —— 原来只能回到内存任务表。
-   *
-   * @returns {string|null} 绝对路径；id 形态不合法 / 不在数据根下 / 目录不存在时返回 null
-   */
-  const resolveTaskDir = (taskId) => {
-    const id = String(taskId || '').trim();
-    if (!TASK_ID_RE.test(id)) return null;
-    const root = path.resolve(baseDir);
-    const dir = path.resolve(path.join(root, 'output', id));
-    if (!dir.startsWith(root + path.sep)) return null;
-    return existsSync(dir) ? dir : null;
-  };
-
-  /** 任务目录下允许被定位/打开的文件名（只认清单里的产物，不收任意文件名） */
-  const SAFE_FILE_RE = /^[\w.\-]+\.(json|jsonl|md|html|txt|yaml|yml|webp|png|jpe?g)$/i;
+  const resolveTaskDir = (taskId) => resolveTaskDirIn(baseDir, taskId);
 
   /**
    * 宿主信任栅栏。
@@ -583,6 +566,55 @@ export function apply(ctx) {
     const ok = await removeJob(taskId);
     sendJson(res, ok ? 200 : 404, { ok });
   });
+
+  /**
+   * Agent 工具的默认模型接口配置。
+   *
+   * 面板里的 baseUrl / apiKey / model 存在浏览器 localStorage —— 宿主进程里的
+   * 工具调用读不到。用户在面板点「保存为工具默认配置」时 POST 到这里，
+   * 落到插件数据目录；工具侧由 `lib/tool_config.js` 读取。
+   */
+  route('exact', '/novel2card/tool-config', async (req, res) => {
+    if (req.method === 'GET') {
+      const saved = await readToolConfig(baseDir);
+      return sendJson(res, 200, {
+        ok: true,
+        config: maskToolConfig(saved),
+        toolNames: [
+          'novel2card_generate', 'novel2card_augment', 'novel2card_image_card',
+          'novel2card_list_results', 'novel2card_read_result',
+        ],
+      });
+    }
+    if (req.method !== 'POST') return sendJson(res, 405, { error: '只支持 GET / POST' });
+    try {
+      const { fields } = await readRequest(req, { maxBytes: 16 * 1024 });
+      const config = await writeToolConfig(baseDir, fields);
+      sendJson(res, 200, { ok: true, config });
+    } catch (e) {
+      sendJson(res, 400, { error: e.message });
+    }
+  });
+
+  /**
+   * Agent 工具：让 DSH 在聊天里直接跑生成任务（用户诉求：
+   * "插件版感觉不如直接让 dsh 直接跑角色卡生成任务"）。
+   *
+   * `tools` 没写进 `inject`：缺 tools 服务的宿主里，面板仍然要能用；
+   * 拿不到就只降级工具，并明确告警。
+   */
+  let toolsService = null;
+  try {
+    toolsService = ctx.get ? ctx.get('tools') : (ctx.tools || null);
+  } catch { /* 没有 tools 服务 */ }
+  if (toolsService && typeof toolsService.register === 'function') {
+    ctx.effect(() => registerTools({ tools: toolsService }, { baseDir }), 'novel2card:tools');
+    ctx.logger?.info?.('[novel2card] 已注册 DSH 工具：'
+      + 'novel2card_generate / novel2card_augment / novel2card_image_card / '
+      + 'novel2card_list_results / novel2card_read_result');
+  } else {
+    ctx.logger?.warn?.('[novel2card] 未找到 tools 服务：面板可用，但 DSH 聊天里没有 novel2card_* 工具');
+  }
 
   ctx.logger?.info?.(`[novel2card] 已就绪，数据目录 ${baseDir}`);
 
