@@ -16,6 +16,18 @@
 
 ---
 
+## 下载
+
+| 方式 | 适合 | 说明 |
+| --- | --- | --- |
+| [**Releases 便携版 zip**](https://github.com/1KMJTIO194/novel-image-to-card/releases/latest) | 不想碰命令行 | 解压后双击启动脚本；首次运行自动装依赖（需 Node.js 18+ 且联网） |
+| `git clone` 源码 | 想改代码 / 参与开发 | `git clone https://github.com/1KMJTIO194/novel-image-to-card.git` → `npm install && npm start` |
+| **DSH 插件** | 已装 DeepSeek Harness | 见 [dsh/README.md](dsh/README.md)（安装到 DSH profile） |
+
+> 便携版 zip 每次发版都会更新；`Releases` 页面同时提供 GitHub 自动生成的源码 zip。
+
+---
+
 ## 快速开始
 
 ### 方式一：一键启动器（推荐给非开发者）
